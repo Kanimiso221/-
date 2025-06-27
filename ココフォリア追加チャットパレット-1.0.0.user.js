@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         ココフォリア追加チャットパレット
-// @version      1.0.1
+// @version      1.0.2
 // @description  ココフォリア上に追加されるいい感じの追加チャットパレット
 // @author       Apocrypha
 // @match        https://ccfolia.com/rooms/*
@@ -33,7 +33,7 @@
     }
 
     /* ========== 設定 ========== */
-    const CMD_KEY='tmPaletteCmds_v3',VAR_KEY='tmPaletteVars_v3',AUTO_KEY='tmPaletteAuto_v3',HELP_KEY = 'tmPaletteHelp_v1';
+    const CMD_KEY='tmPaletteCmds_v3',VAR_KEY='tmPaletteVars_v3',AUTO_KEY='tmPaletteAuto_v3',HELP_KEY = 'tmPaletteHelp_v1',POS_KEY = 'tmPaletteWinPos_v1';
     const DEF_CMDS=[{label:'1D100',lines:['1D100','1d100<=50','CCB<=50']}];
     const DEF_VARS=[{name:'NUM',value:'1'}];
     const TXT_SEL='textarea[name="text"]';
@@ -47,7 +47,7 @@
     const KW_ALIAS={'M':/失敗/,'S':/(?<!決定的)成功|(?<!決定的成功\/)スペシャル/,'F':/致命的失敗/,'100F':/(100.*致命的失敗|致命的失敗.*100)/,'C':/(クリティカル|決定的成功(?:\/スペシャル)?)/,'1C':/(1.*(?:クリティカル|決定的成功)|(?:クリティカル|決定的成功).*1)/};
     const CONF_MIME='application/x-ccp+json';
     const CONF_VER=1;
-    const EXPORT_FILE=()=>`tmPalette_${new Date().toISOString().replace(/[:.]/g,'-')}.ccp`;
+    const EXPORT_FILE=()=>`追加チャット情報${new Date().toISOString().replace(/[:.]/g,'-')}.ccp`;
     const FILE_TYPES=[{description:'Chat-Palette Config',accept:{'application/json':['.ccp']}}];
     /* ========================== */
 
@@ -198,6 +198,7 @@ CCB<=50 【魔法弾】
     /* ========== データ========== */
     let cmds=load(CMD_KEY,DEF_CMDS).map(c=>{if('label'in c)return {auto:false,...c};const [label,...lines]=c.lines??[];return {auto:false,label:label||'Cmd',lines};});
     let vars=load(VAR_KEY,DEF_VARS);
+    let winPos=load(POS_KEY, {});
     let autoCmd=load(AUTO_KEY,['// Auto script here\n(まだ何も出来ないよ)']);
     let autoAst=null,autoTimer=null,hl=null;
 
@@ -517,11 +518,23 @@ CCB<=50 【魔法弾】
     function collectConfig(){return{version:CONF_VER,cmds:cmds,vars:vars,autoCmd:autoCmd}}
 
     /* ========== エクスポート（ダウンロード） ========== */
-    function exportConfig(){
-        const blob=new Blob([JSON.stringify(collectConfig(),null,2)],{type:CONF_MIME});
-        const a=Object.assign(document.createElement('a'),{href:URL.createObjectURL(blob),download:EXPORT_FILE()});
+    async function doDownload(blob,suggestedName='config.ccp') {
+        const picker=window.showSaveFilePicker||unsafeWindow?.showSaveFilePicker;
+        if (picker) {
+            const handle=await picker({suggestedName,types:[{description:'Chat-Palette Config',accept:{[CONF_MIME]:['.ccp']}}]});
+            const writable=await handle.createWritable();
+            await writable.write(blob);
+            await writable.close();
+            return;
+        }
+        const a=Object.assign(document.createElement('a'),{href:URL.createObjectURL(blob),download:suggestedName});
         a.click();
         setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+    }
+
+    async function exportConfig() {
+        const blob = new Blob([JSON.stringify(collectConfig(),null,2)],{type:CONF_MIME});
+        try{await doDownload(blob,EXPORT_FILE());}catch(e){console.warn('save cancelled',e);return;}
         localStorage.removeItem(CMD_KEY);
         localStorage.removeItem(VAR_KEY);
         localStorage.removeItem(AUTO_KEY);
@@ -552,6 +565,10 @@ CCB<=50 【魔法弾】
         };
         inp.click();
     }
+
+    function applyPos(name,el,defX=60,defY=60){const p=winPos[name];el.style.left=(p?.x??defX)+'px';el.style.top=(p?.y ?? defY)+'px';}
+
+    function storePos(name,x,y){winPos[name]={x,y};save(POS_KEY,winPos);}
 
     /* ------------------------------------------------------------------ */
     /* ↓↓↓                UI（パレット／編集／変数）                   ↓↓↓ */
@@ -596,7 +613,7 @@ CCB<=50 【魔法弾】
                                               hd.setPointerCapture(e.pointerId);});
         hd.addEventListener('pointermove',e=>{if(!d)return;el.style.left=`${clamp(ox+e.clientX-sx,0,innerWidth-100)}px`;
                                               el.style.top =`${clamp(oy+e.clientY-sy,0,innerHeight-40)}px`;});
-        hd.addEventListener('pointerup',()=>d=false);
+        hd.addEventListener('pointerup',()=>{d=false;const r=el.getBoundingClientRect();storePos(name,Math.round(r.left),Math.round(r.top));});
     };
     const resz=(el)=>{
         const g=el.querySelector('.rs');let w=0,h=0,sx=0,sy=0,r=false;
