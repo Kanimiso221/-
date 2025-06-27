@@ -1,6 +1,6 @@
 // ==UserScript==
-// @name         CCFOLIA ADD PALLET
-// @version      1.0.0
+// @name         ココフォリア追加チャットパレット
+// @version      1.0.1
 // @description  ココフォリア上に追加されるいい感じの追加チャットパレット
 // @author       Apocrypha
 // @match        https://ccfolia.com/rooms/*
