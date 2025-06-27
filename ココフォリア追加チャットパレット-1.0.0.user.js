@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         ココフォリア追加チャットパレット
+// @name         CCFOLIA ADD PALLET
 // @version      1.0.0
 // @description  ココフォリア上に追加されるいい感じの追加チャットパレット
 // @author       Apocrypha
