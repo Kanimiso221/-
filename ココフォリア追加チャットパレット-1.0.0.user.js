@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name              ココフォリア追加チャットパレット
-// @version           1.1.2
+// @version           1.1.3
 // @description       ココフォリア上に追加されるいい感じの追加チャットパレット
 // @author            Apocrypha
 // @match             https://ccfolia.com/rooms/*
@@ -35,8 +35,8 @@
     const curVer = GM_info.script.version, KEY = 'myScript_prev_ver', prevVer = localStorage.getItem(KEY);
 
     if (prevVer && prevVer !== curVer) {
-        if (confirm(`拡張を ${prevVer} → ${curVer} に更新しました。\nページを再読込しますか？`)) localStorage.setItem(KEY, curVer); location.reload();
-        else localStorage.setItem(KEY, curVer);
+        if (confirm(`拡張を ${prevVer} → ${curVer} に更新しました。\nページを再読込しますか？`)) { localStorage.setItem(KEY, curVer); location.reload(); }
+        else { localStorage.setItem(KEY, curVer); }
     }
 
     /* ========== 設定 ========== */
