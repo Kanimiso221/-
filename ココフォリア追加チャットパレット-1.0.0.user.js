@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name              ココフォリア追加チャットパレット
-// @version           1.2.4
+// @version           1.2.5
 // @description       ココフォリア上に追加されるいい感じの追加チャットパレット
 // @author            Apocrypha
 // @match             https://ccfolia.com/rooms/*
@@ -983,6 +983,7 @@
             row.querySelector('.del').onclick = () => { editors.delete(row); row.remove(); };
             ls.appendChild(row);
             classifyRow(row, (c.lines[0] || '').trim());
+            buildEditorsGradually();
         };
 
         cmds.forEach(addRow);
