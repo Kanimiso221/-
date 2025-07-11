@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name              ココフォリア追加チャットパレット
-// @version           1.1.3
+// @version           1.2.4
 // @description       ココフォリア上に追加されるいい感じの追加チャットパレット
 // @author            Apocrypha
 // @match             https://ccfolia.com/rooms/*
@@ -15,6 +15,8 @@
 // @require           https://cdn.jsdelivr.net/npm/codemirror@5/addon/fold/brace-fold.js
 // @require           https://cdn.jsdelivr.net/npm/codemirror@5/addon/fold/comment-fold.js
 // @require           https://cdn.jsdelivr.net/npm/codemirror@5/addon/fold/indent-fold.js
+// @require           https://cdn.jsdelivr.net/npm/marked/marked.min.js
+// @require           https://cdn.jsdelivr.net/npm/dompurify@3.1.0/dist/purify.min.js
 // @resource CM_BASE  https://cdn.jsdelivr.net/npm/codemirror@5/lib/codemirror.css
 // @resource CM_MONO  https://cdn.jsdelivr.net/npm/codemirror@5/theme/monokai.css
 // @resource CM_FOLD  https://cdn.jsdelivr.net/npm/codemirror@5/addon/fold/foldgutter.css
@@ -49,11 +51,13 @@
     const SEND_DELAY = 500;
     const ROW_STAT = 'div[data-testid="CharacterStatus__row"]';
     const ROW_PARAM = 'div[data-testid="CharacterParam__row"]';
-    const CHAT_CACHE = 20;
+    const CHAT_CACHE = 50;
     const KW_ALIAS = { 'M': /失敗/, 'S': /(?<!決定的)成功|(?<!決定的成功\/)スペシャル/, 'F': /致命的失敗/, '100F': /(100.*致命的失敗|致命的失敗.*100)/, 'C': /(クリティカル|決定的成功(?:\/スペシャル)?)/, '1C': /(1.*(?:クリティカル|決定的成功)|(?:クリティカル|決定的成功).*1)/ };
     const CONF_MIME = 'application/x-ccp+json';
     const CONF_VER = 1;
     const EXPORT_FILE = () => `追加チャット情報${new Date().toISOString().replace(/[:.]/g, '-')}.ccp`;
+    const AUTO_ATTR = 'data-auto-card';
+    const CARD_SEL = `div.MuiPaper-root`;
     /* ========================== */
 
     /* ========== 基本 util ========== */
@@ -67,7 +71,7 @@
     const escReg = s => s.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');
     const idle = window.requestIdleCallback ? f => requestIdleCallback(f, { timeout: 100 }) : f => setTimeout(f, 16);
     const HELP_HTML =
-        `<!--  ─────────────────────────────  -->
+          `<!--  ─────────────────────────────  -->
          <style>
            #tm-help { color:#ddd; }
            #tm-help code        { background:#222;padding:1px 4px;border-radius:3px;color:#9cf; }
@@ -206,6 +210,9 @@
     let winPos = load(POS_KEY, {});
     let autoCmd = load(AUTO_KEY, ['// Auto script here\n(まだ何も出来ないよ)']);
     let hl = null;
+    let hideAutoCards = true;
+    let autoAst = [];
+    let autoTicker = null;
 
     /* ========== キャラステータス DOM 収集 ========== */
     const buildStatMap = () => {
@@ -231,9 +238,9 @@
             .slice(-n)
             .reverse()
             .map(el => {
-                const body = el.querySelector('div[data-testid=\"RoomMessage__body\"], p');
-                return body ? body.innerText.trim() : '';
-            });
+            const body = el.querySelector('div[data-testid=\"RoomMessage__body\"], p');
+            return body ? body.innerText.trim() : '';
+        });
     };
     const wrapMessages = arr => arr.map(txt => {
         const Find = kw => (KW_ALIAS[kw] ?? new RegExp(escReg(kw))).test(txt);
@@ -321,41 +328,74 @@
 
     /* ========== ランタイム環境（変数テーブル） ========== */
     const RT = {
+        /* ① 変数テーブル（ユーザ変数） */
         vars: Object.create(null),
+
+        /* ② 組込み数学関数 */
         funcs: {
             max: Math.max,
             min: Math.min,
             clamp: (x, lo, hi) => Math.min(Math.max(x, lo), hi),
-            abs: Math.abs,
+            abs:  Math.abs,
             ceil: Math.ceil,
             floor: Math.floor,
             print: console.log
         },
-        roomchat: {
-            contents: kw => wrapMessages(getLastMessages()).some(m => m.Find(kw)),
-            send: txt => sendMulti([txt]),
-            num: () => { const m = /→\\s*(\\d+)/.exec(getLastMessages(1)[0] || ''); return m ? +m[1] : 0; }
-        }
+
+        roomchat: (() => {
+            /** 内部ヘルパ：最新 n 件の wrap 済みメッセージ配列を返す */
+            const latest = (n = CHAT_CACHE) => wrapMessages(getLastMessages(n));
+
+            return {
+                /** .at(idx) ─ 0=直近, 1=1つ前 … の Message オブジェクト */
+                at          : idx => latest(idx + 1)[idx] ?? { text: '' },
+
+                /** .contents(kw) ─ 直近ログ群に kw が含まれるか */
+                contents    : kw => latest().some(m => m.Find(kw)),
+
+                /** .contents_at(kw) ─ 直近ログ 1 件で kw の出現数 */
+                contents_at : kw => latest(1)[0]?.FindAt(kw) ?? 0,
+
+                /** .send(txt) ─ チャットへ送信 */
+                send        : txt => enqueueSend([txt]),
+
+                /** .num() ─ 直近ログから「＞ 123」形式の数値を取得 */
+                num         : () => latest(1)[0]?.GetNum() ?? NaN
+            };
+        })()
     };
 
+    /* ========== GUI から変数を取り込む ========== */
     function buildRTfromGui() {
         RT.vars = Object.create(null);
         vars.forEach(v => {
-            const n = v.name, raw = v.value.trim();
+            const n = v.name;
+            const raw = v.value.trim();
             RT.vars[n] = {
                 value: (/^\d+$/.test(raw) ? Number(raw) : raw),
-                type: 'int'
+                type : v.type ?? 'int'
             };
         });
     }
 
     /* ========== 字句解析（Tokenizer）========== */
     function tokenize(src) {
-        const re = /\/\*[^]*?\*\/|\/\/.*?$|\s+|"(?:[^"\\]|\\.)*"|\d+\.\d+|\d+|==|!=|\+\+|--|\+=|-=|\*=|\/=|%=|[A-Za-z_]\w*|[(){};,.+\-*/%<>=]/gm;
+        const TOK_PATTERNS = [
+            '\\/\\*[^]*?\\*\\/',
+            '\\/\\/[^\\n\\r]*',
+            '\\s+',
+            '"(?:[^"\\\\]|\\\\.)*"',
+            '\\d+\\.\\d+','\\d+',
+            '\\|\\||&&|==|!=|<=|>=|\\+\\+|--|\\+=|-=|\\*=|\\/=|%=',
+            '[A-Za-z_]\\w*',
+            '[(){};,.+\\-*/%<>=|&?:]'
+        ];
+        const TOKEN_RE = new RegExp(TOK_PATTERNS.join('|'), 'g');
         const out = [];
-        for (let m; (m = re.exec(src));) {
+        let m;
+        while ((m = TOKEN_RE.exec(src))) {
             const tk = m[0];
-            if (/^(?:\s+|\/\/)/.test(tk)) continue;
+            if (/^\s+$/.test(tk) || tk.startsWith('/*') || tk.startsWith('//')) continue;
             out.push(tk);
         }
         return out;
@@ -375,21 +415,40 @@
 
         const prog = [];
         function parseExpr() {
-            let lhs = parseTerm();
-
-            const asg = peek();
-            if (['=', '+=', '-=', '*=', '/=', '%='].includes(asg)) {
-                next();
-                const rhs = parseExpr();
-                return { kind: 'assign', op: asg, lhs, rhs };
+            let node = parseAnd();
+            while (peek() === '||') {
+                const op = next();
+                const rhs = parseAnd();
+                node = { kind:'bin', op, lhs:node, rhs };
             }
-
-            while (['+', '-', '==', '!='].includes(peek())) {
-                const op = next(), rhs = parseTerm();
-                lhs = { kind: 'bin', op, lhs, rhs };
+            return node;
+        }
+        function parseAnd() {
+            let node = parseEquality();
+            while (peek() === '&&') {
+                const op = next();
+                const rhs = parseEquality();
+                node = { kind:'bin', op, lhs:node, rhs };
             }
-
-            return lhs;
+            return node;
+        }
+        function parseEquality() {
+            let node = parseAdditive();
+            while (['==','!=','<','>','<=','>='].includes(peek())) {
+                const op = next();
+                const rhs = parseAdditive();
+                node = { kind:'bin', op, lhs:node, rhs };
+            }
+            return node;
+        }
+        function parseAdditive() {
+            let node = parseTerm();
+            while (['+','-'].includes(peek())) {
+                const op = next();
+                const rhs = parseTerm();
+                node = { kind:'bin', op, lhs:node, rhs };
+            }
+            return node;
         }
         function parseTerm() {
             let lhs = parseFactor();
@@ -399,18 +458,29 @@
             }
             return lhs;
         }
+        function parseBlock(){ expect('{'); const out=[]; while(peek()!=='}') { out.push(parseExpr()); expect(';'); } expect('}'); return out; }
         function parseFactor() {
+            if (peek() === '++' || peek() === '--') {
+                const op = next();
+                const expr = parseFactor();
+                return { kind: 'unary', op, pre: true, expr };
+            }
+
             let node;
             const tk = next();
 
             if (tk === '(') { node = parseExpr(); expect(')'); }
-            else if (/^\d/.test(tk)) node = { kind: 'num', val: +tk };
-            else if (/^"/.test(tk)) node = { kind: 'str', val: tk.slice(1, -1) };
-            else node = { kind: 'var', name: tk };
+            else if (/^\d/.test(tk)) { node = { kind: 'num', val: +tk }; }
+            else if (/^"/.test(tk)) { node = { kind: 'str', val: tk.slice(1, -1) }; }
+            else { node = { kind: 'var', name: tk }; }
 
             while (true) {
-                if (peek() === '.') {
-                    next(); const prop = next();
+                if (peek() === '++' || peek() === '--') {
+                    const op = next();
+                    node = { kind: 'unary', op, pre: false, expr: node };
+                } else if (peek() === '.') {
+                    next();
+                    const prop = next();
                     node = { kind: 'prop', obj: node, prop };
                 } else if (peek() === '(') {
                     next();
@@ -426,26 +496,87 @@
             return node;
         }
 
+
         while (i < tokens.length) {
             const tk = peek();
-            if (tk === 'int' || tk === 'float') {
-                const type = next(), name = next();
+
+            if (['int','float','string','array',
+                 'readonly','const','memory'].includes(tk)) {
+
+                let attr = { ro:false, const:false, mem:false };
+                while (['readonly','const','memory'].includes(peek())) {
+                    const w = next();
+                    if (w==='readonly') attr.ro=true;
+                    if (w==='const') attr.const=true;
+                    if (w==='memory') attr.mem=true;
+                }
+                const type = next();
+                const name = next();
                 let init = null;
-                if (peek() === '=') { next(); init = parseExpr(); }
+                if (peek()==='='){ next(); init=parseExpr(); }
                 expect(';');
-                prog.push({ kind: 'decl', type, name, init });
-            } else if (tk === 'if') {
-                next(); expect('('); const cond = parseExpr(); expect(')');
-                expect('{'); const body = []; while (peek() !== '}') { body.push(parseExpr()); expect(';'); }
-                expect('}'); prog.push({ kind: 'if', cond, body });
-            } else if (tk === 'trigger') {
-                next(); expect('('); const cond = parseExpr(); expect(')'); expect('{');
-                const body = []; while (peek() !== '}') { body.push(parseExpr()); expect(';'); }
-                expect('}'); prog.push({ kind: 'trigger', cond, body, runned: false });
-            } else {
-                const e = parseExpr(); expect(';'); prog.push({ kind: 'expr', expr: e });
+                prog.push({ kind:'decl', type, name, init, attr });
+                continue;
             }
+
+            if (tk==='if') {
+                next(); expect('('); const cond=parseExpr(); expect(')');
+                const body=parseBlock();
+                prog.push({kind:'if',cond,body});
+                continue;
+            }
+
+            if (tk==='while') {
+                next(); expect('('); const cond=parseExpr(); expect(')');
+                const body=parseBlock();
+                prog.push({kind:'while',cond,body});
+                continue;
+            }
+
+            if (tk==='for') {
+                next(); expect('(');
+                const init=parseExpr(); expect(';');
+                const cond=parseExpr(); expect(';');
+                const step=parseExpr(); expect(')');
+                const body=parseBlock();
+                prog.push({kind:'for',init,cond,step,body});
+                continue;
+            }
+
+            if (tk==='do') {
+                next();
+                const body=parseBlock();
+                expect('while'); expect('('); const cond=parseExpr(); expect(')'); expect(';');
+                prog.push({kind:'do',cond,body});
+                continue;
+            }
+
+            if (tk==='switch') {
+                next(); expect('('); const expr=parseExpr(); expect(')');
+                expect('{'); const cases=[];
+                while (peek()!=='}') {
+                    expect('case'); const val=parseExpr(); expect(':');
+                    const body=[]; while (peek()!=='case' && peek()!=='}'){
+                        body.push(parseExpr()); expect(';');
+                    }
+                    cases.push({val,body});
+                } expect('}');
+                prog.push({kind:'switch',expr,cases});
+                continue;
+            }
+
+            if (tk==='trigger') {
+                next(); expect('('); const cond=parseExpr(); expect(')');
+                const body=parseBlock();
+                prog.push({kind:'trigger',cond,body,runned:false});
+                continue;
+            }
+
+            const expr = parseExpr();
+            expect(';');
+            prog.push({kind:'expr',expr});
         }
+
         return prog;
     }
 
@@ -462,17 +593,28 @@
                 return 0;
             }
             case 'bin': {
-                const l = evalNode(node.lhs, env), r = evalNode(node.rhs, env);
+                const l = evalNode(node.lhs, env);
                 switch (node.op) {
-                    case '+': return l + r; case '-': return l - r;
-                    case '*': return l * r; case '/': return l / r; case '%': return l % r;
-                    case '==': return l == r; case '!=': return l != r;
-                }
+                    case '<' : return l < evalNode(node.rhs, env);
+                    case '>' : return l > evalNode(node.rhs, env);
+                    case '<=': return l <= evalNode(node.rhs, env);
+                    case '>=': return l >= evalNode(node.rhs, env);
+                    case '+': return l + evalNode(node.rhs, env);
+                    case '-': return l - evalNode(node.rhs, env);
+                    case '*': return l * evalNode(node.rhs, env);
+                    case '/': return l / evalNode(node.rhs, env);
+                    case '%': return l % evalNode(node.rhs, env);
+                    case '==': return l == evalNode(node.rhs, env);
+                    case '!=': return l != evalNode(node.rhs, env);
+                    case '||': return l || evalNode(node.rhs, env);
+                    case '&&': return l && evalNode(node.rhs, env);
+                } break;
             }
             case 'prop': return evalNode(node.obj, env)[node.prop];
             case 'assign': {
-                const name = node.lhs.name;
-                if (node.lhs.kind !== 'var') { alert('左辺は変数限定'); throw '左辺は変数限定'; }
+                const name=node.lhs.name;
+                const v = env.vars[name];
+                if (v?.attr?.ro || v?.attr?.const) throw `書換禁止 ${name}`;
                 if (!(name in env.vars) && (name in env || name in env.funcs)) { alert(`組込み名 ${name} は書き換え禁止`); throw `組込み名 ${name} は書き換え禁止`; }
                 const cur = env.vars[name]?.value ?? 0;
                 const rhs = evalNode(node.rhs, env);
@@ -491,7 +633,13 @@
             }
             case 'call': {
                 const fn = evalNode(node.func, env);
-                if (typeof fn !== 'function') { throw `呼び出し対象が関数でない: ${node.func.prop || node.func.name}`; }
+                if (typeof fn !== 'function' ||
+                    fn === Function || fn === Function.prototype) {
+                    throw `呼び出し禁止: unsafe function`;
+                }
+                const banned = [eval, setTimeout, setInterval, Function];
+                if (banned.includes(fn)) throw `呼び出し禁止: ${fn.name}`;
+
                 const args = node.args.map(a => evalNode(a, env));
                 return fn.apply(null, args);
             }
@@ -500,24 +648,87 @@
                 return;
             }
             case 'expr': evalNode(node.expr, env); return;
-
             case 'if':
                 if (evalNode(node.cond, env)) node.body.forEach(n => evalNode(n, env));
                 return;
-
             case 'trigger':
                 if (!node.runned && evalNode(node.cond, env)) {
                     node.runned = true;
                     node.body.forEach(n => evalNode(n, env));
                 }
                 return;
+            case 'unary': {
+                const n = node.expr.name;
+                const cur = env.vars[n]?.value ?? 0;
+                const val = node.op==='++' ? cur+1 : cur-1;
+                env.vars[n].value = val;
+                return node.pre ? val : cur;
+            }
+            case 'while':
+                while (evalNode(node.cond,env)) node.body.forEach(n=>evalNode(n,env));
+                return;
+            case 'for':
+                evalNode(node.init,env);
+                while (evalNode(node.cond,env)) {
+                    node.body.forEach(n=>evalNode(n,env));
+                    evalNode(node.step,env);
+                } return;
+            case 'do':
+                do { node.body.forEach(n=>evalNode(n,env)); }
+                while (evalNode(node.cond,env));
+                return;
+            case 'switch': {
+                const v=evalNode(node.expr,env);
+                for (const c of node.cases){
+                    if (evalNode(c.val,env)===v){
+                        c.body.forEach(n=>evalNode(n,env));
+                        break;
+                    }
+                } return;
+            }
         }
     }
 
-    function syncVarsToStorage() {
-        vars = Object.entries(RT.vars).map(([k, obj]) => ({ name: k, value: String(obj.value) }));
-        save(VAR_KEY, vars);
+    function syncVarsToStorage(){
+        for (const [k,v] of Object.entries(RT.vars)){
+            if (v.attr?.mem){
+                GM_setValue('mem_'+k, JSON.stringify(v.value));
+            }
+        }
+        // 普通の vars も保存するならここで…
     }
+
+    function restoreMemory(){
+        for (const k of GM_listValues()){
+            if (k.startsWith('mem_')){
+                const name = k.slice(4);
+                RT.vars[name]={value:JSON.parse(GM_getValue(k)),type:'int',attr:{mem:true}};
+            }
+        }
+    }
+
+    /* ========== Auto 実行ループ＋メモリリーク対策 ========== */
+    function startAutoLoop() { if (autoTicker || au) return; if (!autoAst.length) return; autoTicker = setInterval(runAuto, 200); }
+
+    function stopAutoLoop() { if (autoTicker) { clearInterval(autoTicker); autoTicker = null; } }
+
+    function runAuto () {
+        if (au) return;
+        for (const n of autoAst) {
+            if (n.kind === 'trigger') {
+                if (!n.runned && evalNode(n.cond, RT)) {
+                    n.runned = true;
+                    n.body.forEach(b => evalNode(b, RT));
+                }
+            } else if (n.kind !== 'decl') {
+                evalNode(n, RT);
+            }
+        }
+        syncVarsToStorage();
+    }
+
+    /* タブが非表示になったら停止 → 戻ったら再開 */
+    document.addEventListener('visibilitychange', () => { if (document.hidden || au) stopAutoLoop(); else startAutoLoop(); });
 
     /* ========== 設定オブジェクト ========== */
     function collectConfig() { return { version: CONF_VER, cmds: cmds, vars: vars, autoCmd: autoCmd } }
@@ -575,13 +786,54 @@
 
     function storePos(name, x, y) { winPos[name] = { x, y }; save(POS_KEY, winPos); }
 
+    /* ========== 自動スクリプトカード非表示 ========== */
+    function isAutoScriptCard(card) { return !!card.querySelector('button[aria-label="閉じる"]'); }
+
+    function markAndToggle(card) {
+        if (!card.hasAttribute(AUTO_ATTR)) {
+            card.setAttribute(AUTO_ATTR, isAutoScriptCard(card));
+        }
+        if (hideAutoCards && card.getAttribute(AUTO_ATTR) === 'true') {
+            card.style.display = 'none';
+        } else {
+            card.style.display = '';
+        }
+    }
+
+    // ―― 既存カードを一斉チェック
+    document.querySelectorAll(CARD_SEL).forEach(markAndToggle);
+
+    // ―― 新着カードを監視
+    new MutationObserver(muts => {
+        muts.forEach(m => {
+            m.addedNodes.forEach(n => {
+                if (n.nodeType !== 1) return;
+                if (n.matches?.(CARD_SEL)) markAndToggle(n);
+                n.querySelectorAll?.(CARD_SEL).forEach(markAndToggle);
+            });
+        });
+    }).observe(document.body, { childList: true, subtree: true });
+
+    /* Alt + R で表示/非表示トグル ----------------------- */
+    document.addEventListener('keydown', e => {
+        if (e.altKey && !e.ctrlKey && !e.shiftKey && e.key.toLowerCase() === 'r') {
+            hideAutoCards = !hideAutoCards;
+            document.querySelectorAll(`${CARD_SEL}[${AUTO_ATTR}]`)
+                .forEach(el => {
+                el.style.display =
+                    (hideAutoCards && el.getAttribute(AUTO_ATTR) === 'true')
+                    ? 'none' : '';
+            });
+        }
+    });
+
     /* ------------------------------------------------------------------ */
     /* ↓↓↓                UI（パレット／編集／変数）                   ↓↓↓ */
     /* ------------------------------------------------------------------ */
 
     const css = `
 #tm-win,#tm-ed,#tm-var{position:fixed;background:rgba(44,44,44,.87);color:#fff;z-index:99999;box-shadow:0 2px 6px rgba(0,0,0,.4);border-radius:4px;font-family:sans-serif;display:flex;flex-direction:column;}
-#tm-win{top:60px;left:60px;width:260px;min-width:260px;}
+#tm-win{top:60px;left:60px;width:280px;min-width:260px;max-height:70vh;overflow:auto;}
 #tm-ed {top:90px;left:90px;width:700px;min-width:320px;max-height:70vh;overflow:auto;}
 #tm-var{top:120px;left:120px;width:350px;min-width:280px;max-height:70vh;overflow:auto;}
 .head{height:28px;display:flex;align-items:center;padding:0 6px;border-bottom:1px solid #555;cursor:move;}
@@ -646,7 +898,7 @@
     const buildWin = () => {
         if (win) win.remove();
         win = document.createElement('div'); win.id = 'tm-win';
-        win.innerHTML = `<div class="head"><span>パレット</span><button class="b" id="impB">⤒</button><button class="b" id="expB">⤓</button>
+        win.innerHTML = `<div class="head"><span>パレット</span><button class="b" id="autoHideB">🎲</button><button class="b" id="impB">⤒</button><button class="b" id="expB">⤓</button>
                        <button class="b" id="hB">？</button><button class="b" id="aB">A</button><button class="b" id="vB">Φ</button>
                        <button class="b" id="eB">⚙</button><button class="b" id="cB">✕</button></div><div class="g" id="gp"></div><div class="rs"></div>`;
         drag(win); resz(win);
@@ -664,6 +916,15 @@
         win.querySelector('#hB').onclick = toggleHelp;
         win.querySelector('#impB').onclick = importConfig;
         win.querySelector('#expB').onclick = exportConfig;
+        win.querySelector('#autoHideB').onclick = () => {
+            hideAutoCards = !hideAutoCards;
+            document.querySelectorAll(`${CARD_SEL}[${AUTO_ATTR}]`)
+                .forEach(el => {
+                el.style.display =
+                    (hideAutoCards && el.getAttribute(AUTO_ATTR) === 'true')
+                    ? 'none' : '';
+            });
+        };
         document.body.appendChild(win);
     };
     const toggleWin = () => document.body.contains(win) ? win.remove() : buildWin();
@@ -778,7 +1039,8 @@
 
     /* ========== Auto コマンド編集 ========== */
     const toggleAuto = () => {
-        if (au) { au.remove(); au = null; return; }
+        if (au) { au.remove(); au = null; startAutoLoop(); return; }
+        stopAutoLoop();
         au = document.createElement('div'); au.id = 'tm-au';
         au.innerHTML = `<div class="head"><span>AUTO コマンド</span><button class="b" id="x">✕</button></div>
                         <textarea id="au-ta"style="flex:1;min-height:0;margin:8px;background:#555;color:#fff;
@@ -789,15 +1051,22 @@
         ta.value = autoCmd.join('\n');
         buildRTfromGui();
         au.querySelector('#sv').onclick = () => {
-            autoCmd = ta.value.split(/\\r?\\n/);
+            autoCmd = ta.value.split(/\r?\n/);
             save(AUTO_KEY, autoCmd);
-            buildRTfromGui();
-            const tokens = tokenize(autoCmd.join('\\n'));
-            const ast = parse(tokens);
-            ast.forEach(n => { if (n.kind !== 'trigger') evalNode(n, RT); }); autoAst = ast;
+            const tokens = tokenize(autoCmd.join('\n'));
+            console.log('tokens=', tokens);
+            autoAst = parse(tokens);
+            autoAst.forEach(n => {
+                if (n.kind === 'decl' || (n.kind === 'expr' && n.immediate)) {
+                    evalNode(n, RT);
+                }
+            });
             au.remove(); au = null;
+            startAutoLoop();
+            console.log('autoTicker=', autoTicker);
+            console.log('autoAst=', autoAst);
         };
-        au.querySelector('#x').onclick = () => { au.remove(); au = null; };
+        au.querySelector('#x').onclick = () => { au.remove(); au = null; startAutoLoop(); };
         document.body.appendChild(au);
     };
 
@@ -834,6 +1103,7 @@
             if (k === HK_VIEW) toggleWin();
             if (k === HK_EDIT) toggleEd();
             if (k === HK_VARS) toggleVar();
+            if (e.key === 'e') win.style.display = (win.style.display === 'none') ? '' : 'none';
         }
     });
 
