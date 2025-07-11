@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name              ココフォリア追加チャットパレット
-// @version           1.2.5
+// @version           1.3.4
 // @description       ココフォリア上に追加されるいい感じの追加チャットパレット
 // @author            Apocrypha
 // @match             https://ccfolia.com/rooms/*
@@ -70,16 +70,70 @@
     const save = (k, v) => localStorage.setItem(k, JSON.stringify(v));
     const escReg = s => s.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');
     const idle = window.requestIdleCallback ? f => requestIdleCallback(f, { timeout: 100 }) : f => setTimeout(f, 16);
+    const highlightPaletteKW = (() => {
+        const WORDS = [
+            'SEnd',
+            'CMessage',
+            'CharBox',
+            'CharBoxMax',
+            'CharBoxRaw',
+            'Actor',
+            'Actor\\.Set'
+        ];
+        const re = new RegExp(`^(?:${WORDS.join('|')})\\b`);
+
+        return {
+            token(stream) {
+                if (stream.match(re)) return 'tm-kw';
+                while (stream.next() != null && !stream.match(re, false)) {/*skip*/}
+                return null;
+            }
+        };
+    })();
     const HELP_HTML =
           `<!--  ─────────────────────────────  -->
-         <style>
-           #tm-help { color:#ddd; }
-           #tm-help code        { background:#222;padding:1px 4px;border-radius:3px;color:#9cf; }
-           #tm-help pre         { background:#222;padding:6px;border-radius:4px;overflow:auto;color:#cfc; }
-           #tm-help table       { border-collapse:collapse;font-size:12px; }
-           #tm-help th,#tm-help td{ border:1px solid #555;padding:4px; }
-           #tm-help thead th    { background:#333;color:#fff; }
-           #tm-help tbody tr:nth-child(odd){ background:#2a2a2a; }
+          <style>
+            #tm-help { color:#ddd; }
+            /* コードブロック全体 */
+            #tm-help pre{
+              background:#1b1b1b;     /* わずかに濃いめ */
+              color:#d0ffcf;          /* 既存の #cfc を少し明度アップ */
+              font-family:Consolas, Menlo, monospace;
+              font-size:12.5px;       /* ＋0.5px だけ大きく */
+              line-height:1.45;       /* 行間を空けて詰まりを解消 */
+              padding:10px 12px;      /* ゆとりを持たせる */
+              border-radius:4px;
+              overflow-x:auto;        /* 横長でもはみ出さない */
+              white-space:pre;        /* Firefox 対策（折返し無効化） */
+            }
+
+            #tm-help .CodeMirror,
+            #tm-help .CodeMirror-lines   { padding:0 !important; }
+
+            #tm-help pre,
+            #tm-help .CodeMirror         {
+              font-family:Consolas,Menlo,'Source Code Pro','Fira Code',monospace;
+              font-size:13px;
+              letter-spacing:.03em;
+              line-height:1.55;
+              background:#1b1b1b;
+              color:#d0ffcf;
+              border-radius:4px;
+            }
+            /* pre 内のインライン code（強調）を少し暗めのパネルで */
+            #tm-help pre code{
+              background:#252525;
+              color:#9ff;             /* 水色寄りで差別化 */
+              padding:0 2px;
+              border-radius:3px;
+            }
+            /* ─────────────────────── */
+            #tm-help code        { background:#222;padding:1px 4px;border-radius:3px;color:#9cf; }
+            /* 既存の code はそのまま。他と被らないよう上書き順を調整 */
+            #tm-help table       { border-collapse:collapse;font-size:12px; }
+            #tm-help th,#tm-help td{ border:1px solid #555;padding:4px; }
+            #tm-help thead th    { background:#333;color:#fff; }
+            #tm-help tbody tr:nth-child(odd){ background:#2a2a2a; }
          </style>
 
          <h2 style="margin-top:0">拡張チャットパレット&nbsp;—&nbsp;かんたんヘルプ</h2>
@@ -128,6 +182,36 @@
          <tr><td style="padding-left:20px"><code>.MatchAll(re)</code></td><td>match[]</td><td>全マッチ</td></tr>
          <tr><td style="padding-left:20px"><code>.GetNum()</code></td><td>number</td><td>「…＞ 12」の 12 を取得</td></tr>
          <tr><td style="padding-left:20px"><code>.Send(...txt)</code></td><td>void</td><td>引数を順に送信</td></tr>
+         <tr><td colspan="3"><b>キャラクターボックス参照</b></td></tr>
+         <tr>
+           <td style="padding-left:20px"><code>CharBox(lbl,&nbsp;idx=0)</code></td>
+           <td>number/string<br><small>null</small></td>
+           <td>
+             <code>&quot;HP&quot;</code>&nbsp;などラベル名で<br>
+             <b>現在値</b> を取得。<br>
+             パーティ順で <code>idx</code> 指定も可
+           </td>
+         </tr>
+         <tr>
+           <td style="padding-left:20px"><code>CharBoxMax(lbl,&nbsp;idx=0)</code></td>
+           <td>number/string<br><small>null</small></td>
+           <td>ラベルの <b>最大値</b> を取得</td>
+         </tr>
+         <tr>
+           <td style="padding-left:20px"><code>CharBoxRaw(lbl,&nbsp;idx=0)</code></td>
+           <td>string<br><small>null</small></td>
+           <td><code>&quot;20/35&quot;</code> のような<br>「現在/最大」文字列をそのまま</td>
+         </tr>
+         <tr><td colspan="3"><b>アクター切替</b></td></tr>
+         <tr>
+           <td style="padding-left:20px"><code>Actor(name)</code><br><code>Actor.Set(name)</code></td>
+           <td>void</td>
+           <td>
+             <b>指定キャラクターをアクティブ化</b><br>
+             例：<code>Actor('PC-A')</code><br>
+             （非同期処理は内部で済むので <code>await</code> 不要）
+           </td>
+         </tr>
          </tbody>
          </table>
          </details>
@@ -256,6 +340,80 @@
         return { text: txt, Find, Lines, Match, MatchAll, FindAt, GetNum, Send: (...lines) => enqueueSend(lines.flat()) };
     });
 
+    /* ========== キャラクターボックスの値取得 ========== */
+    function collectCharStats() {
+        const out = Object.create(null);
+        document.querySelectorAll('.sc-iKUUEK').forEach((box, idx) => {
+            box.querySelectorAll('.sc-cTsLrp').forEach(bl => {
+                const pList = bl.querySelectorAll('p');
+                const key = pList[0].textContent.trim();
+                if (pList.length < 2) return;
+                const val = pList[1].textContent.trim();
+                if (key) (out[key] ??= [])[idx] = val;
+            });
+            const badge = box.querySelector('.MuiBadge-badge:not(.MuiBadge-invisible)');
+            if (badge) (out['イニシアチブ'] ??= [])[idx] = badge.textContent.trim();
+        });
+        return out;
+    }
+
+    //  ==== アクター選択ヘルパ =========================
+    async function _selectActor(label){
+        const btn = document.querySelector('button[aria-label="キャラクター選択"]');
+        if(!btn) return console.warn('Actor button not found');
+
+        btn.click();
+
+        const ul = await new Promise(res => {
+            const iv = setInterval(() => {
+                const el = document.querySelector('.MuiPopover-paper ul');
+                if(el){ clearInterval(iv); res(el); }
+            },50);
+            setTimeout(() => { clearInterval(iv); res(null); }, 2000);
+        });
+        if(!ul) return console.warn('Actor list not found');
+
+        const rex = label instanceof RegExp ? label : new RegExp(label.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),'i');
+
+        const row = [...ul.querySelectorAll('.MuiListItemButton-root')].find(r => rex.test(r.querySelector('.MuiListItemText-primary')?.textContent || ''));
+
+        (row||document.body).click();
+        if(!row) console.warn('Actor "'+label+'" not found');
+    }
+
+    let _actorChain = Promise.resolve();
+    function Actor(label){ _actorChain = _actorChain.then(()=>_selectActor(label)); }
+    Actor.Set = Actor; window.Actor = Actor;
+
+    /* ========== 共通パーサ ========== */
+    function __splitVal(val){
+        const m = String(val).match(/^(-?\d+(?:\.\d+)?)(?:\s*\/\s*(-?\d+(?:\.\d+)?))?$/);
+        return m ? [Number(m[1]), m[2]!==undefined?Number(m[2]):undefined] : [val, undefined];
+    }
+
+    /* ========== 現在値（既定） ========== */
+    function CharBox(label, idx = 0){
+        if (!window.__charStatCache || Date.now()-window.__charStatTime>2000){
+            window.__charStatCache = collectCharStats();
+            window.__charStatTime = Date.now();
+        }
+        const raw = (window.__charStatCache[label]||[])[idx];
+        if(raw===undefined) return null;
+        const [cur] = __splitVal(raw);
+        return cur;
+    }
+
+    /* ========== 最大値 ========== */
+    function CharBoxMax(label, idx = 0){
+        const raw = (window.__charStatCache?.[label]||[])[idx];
+        if(raw===undefined) return null;
+        const [, max] = __splitVal(raw);
+        return max!==undefined ? max : CharBox(label,idx);
+    }
+
+    /* ========== 生文字列 ========== */
+    function CharBoxRaw(label, idx = 0) { return (window.__charStatCache?.[label]||[])[idx] ?? null; }
+
     /* ========== 再帰展開 ========== */
     const expOnce = (s, d) => s.replace(/\{([^{}]+?)}/g, (m, p) => d[p] !== undefined ? d[p] : m);
     const expRec = (s, d) => { let p; do { p = s; s = expOnce(s, d); } while (s !== p); return s; };
@@ -279,6 +437,10 @@
         let stop = false;
         Object.defineProperty(ctx, 'SEnd', { value: () => { stop = true; }, writable: false });
         Object.defineProperty(ctx, 'CMessage', { get: () => wrapMessages(getLastMessages()), enumerable: false });
+        Object.defineProperty(ctx, 'CharBox', { value: CharBox, writable: false, enumerable: false });
+        Object.defineProperty(ctx, 'CharBoxMax', { value: CharBoxMax,enumerable: false});
+        Object.defineProperty(ctx, 'CharBoxRaw', { value: CharBoxRaw,enumerable: false});
+        Object.defineProperty(ctx, 'Actor', { value: Actor, writable:false });
 
         for (let i = 0; i < rawLines.length; i++) {
             let raw = rawLines[i];
@@ -458,7 +620,83 @@
             }
             return lhs;
         }
-        function parseBlock(){ expect('{'); const out=[]; while(peek()!=='}') { out.push(parseExpr()); expect(';'); } expect('}'); return out; }
+        function parseStmt() {
+            const tk = peek();
+
+            if (['int','float','string','array','readonly','const','memory'].includes(tk)) {
+                let attr = { ro:false, const:false, mem:false };
+                while (['readonly','const','memory'].includes(peek())) {
+                    const w = next();
+                    if (w==='readonly') attr.ro = true;
+                    if (w==='const') attr.const = true;
+                    if (w==='memory') attr.mem = true;
+                }
+                const type = next();
+                const name = next();
+                let init = null;
+                if (peek() === '='){ next(); init = parseExpr(); }
+                expect(';');
+                return { kind:'decl', type, name, init, attr };
+            }
+
+            if (tk === 'if') {
+                next(); expect('('); const cond = parseExpr(); expect(')');
+                const body = parseBlock();
+                return { kind: 'if', cond, body };
+            }
+
+            if (tk === 'while') {
+                next(); expect('('); const cond =parseExpr(); expect(')');
+                const body = parseBlock();
+                return { kind: 'while', cond, body };
+            }
+
+            if (tk === 'for') {
+                next(); expect('(');
+                const init = parseExpr(); expect(';');
+                const cond = parseExpr(); expect(';');
+                const step = parseExpr(); expect(')');
+                const body = parseBlock();
+                return { kind: 'for', init, cond, step, body };
+            }
+
+            if (tk === 'do') {
+                next();
+                const body = parseBlock();
+                expect('while'); expect('('); const cond = parseExpr(); expect(')'); expect(';');
+                return { kind: 'do', cond, body };
+            }
+
+            if (tk === 'switch') {
+                next(); expect('('); const expr = parseExpr(); expect(')');
+                expect('{'); const cases = [];
+                while (peek() !== '}') {
+                    expect('case'); const val = parseExpr(); expect(':');
+                    const body = []; while (peek() !== 'case' && peek() !== '}'){
+                        body.push(parseExpr()); expect(';');
+                    }
+                    cases.push({val,body});
+                } expect('}');
+                return { kind: 'switch', expr, cases};
+            }
+
+            if (tk === 'trigger') {
+                next(); expect('('); const cond = parseExpr(); expect(')');
+                const body = parseBlock();
+                return { kind: 'trigger', cond, body, runned: false};
+            }
+
+            const expr = parseExpr();
+            expect(';');
+            return { kind:'expr', expr };
+        }
+        function parseBlock() {
+            expect('{');
+            const body = [];
+            while (peek() !== '}') body.push(parseStmt());
+            expect('}');
+            return body;
+        }
         function parseFactor() {
             if (peek() === '++' || peek() === '--') {
                 const op = next();
@@ -497,85 +735,7 @@
         }
 
 
-        while (i < tokens.length) {
-            const tk = peek();
-
-            if (['int','float','string','array',
-                 'readonly','const','memory'].includes(tk)) {
-
-                let attr = { ro:false, const:false, mem:false };
-                while (['readonly','const','memory'].includes(peek())) {
-                    const w = next();
-                    if (w==='readonly') attr.ro=true;
-                    if (w==='const') attr.const=true;
-                    if (w==='memory') attr.mem=true;
-                }
-                const type = next();
-                const name = next();
-                let init = null;
-                if (peek()==='='){ next(); init=parseExpr(); }
-                expect(';');
-                prog.push({ kind:'decl', type, name, init, attr });
-                continue;
-            }
-
-            if (tk==='if') {
-                next(); expect('('); const cond=parseExpr(); expect(')');
-                const body=parseBlock();
-                prog.push({kind:'if',cond,body});
-                continue;
-            }
-
-            if (tk==='while') {
-                next(); expect('('); const cond=parseExpr(); expect(')');
-                const body=parseBlock();
-                prog.push({kind:'while',cond,body});
-                continue;
-            }
-
-            if (tk==='for') {
-                next(); expect('(');
-                const init=parseExpr(); expect(';');
-                const cond=parseExpr(); expect(';');
-                const step=parseExpr(); expect(')');
-                const body=parseBlock();
-                prog.push({kind:'for',init,cond,step,body});
-                continue;
-            }
-
-            if (tk==='do') {
-                next();
-                const body=parseBlock();
-                expect('while'); expect('('); const cond=parseExpr(); expect(')'); expect(';');
-                prog.push({kind:'do',cond,body});
-                continue;
-            }
-
-            if (tk==='switch') {
-                next(); expect('('); const expr=parseExpr(); expect(')');
-                expect('{'); const cases=[];
-                while (peek()!=='}') {
-                    expect('case'); const val=parseExpr(); expect(':');
-                    const body=[]; while (peek()!=='case' && peek()!=='}'){
-                        body.push(parseExpr()); expect(';');
-                    }
-                    cases.push({val,body});
-                } expect('}');
-                prog.push({kind:'switch',expr,cases});
-                continue;
-            }
-
-            if (tk==='trigger') {
-                next(); expect('('); const cond=parseExpr(); expect(')');
-                const body=parseBlock();
-                prog.push({kind:'trigger',cond,body,runned:false});
-                continue;
-            }
-
-            const expr = parseExpr();
-            expect(';');
-            prog.push({kind:'expr',expr});
-        }
+        while (i < tokens.length) { prog.push(parseStmt()); }
 
         return prog;
     }
@@ -854,7 +1014,10 @@
 .del:hover,.add:hover,.save:hover{filter:brightness(1.2);}
 #tm-launch{margin-left:12px;}
 .row{display:flex;flex-direction:column;gap:4px;position:relative;overflow:visible;}
-.row .del{position:absolute;top:0;right:0;width:22px;background:#833;}
+.row .ctrl{position:absolute;top:0;right:0;display:flex;flex-direction:column;gap:2px;}
+.row .ctrl .b{width:22px;background:#555;color:#ccc;line-height:18px;padding:0;}
+.row .ctrl .b:hover{color:#fff;filter:brightness(1.2);}
+.row .ctrl .del{background:#833;}
 .row textarea{resize:none;overflow:hidden;background:transparent;border:1px solid #777;border-radius:2px;color:#fff;}
 .row.type-cmd    { background:rgba( 90, 90, 90,.25); }
 .row.type-wait   { background:rgba(255,200,  0,.15); }
@@ -862,7 +1025,10 @@
 .row.type-script textarea{ border-left:4px solid #4aaaff; }
 .CodeMirror { background:#1e1e1e; }
 #tm-au{position:fixed;top:180px;left:180px;width:400px;height:280px;background:rgba(44,44,44,.87);color:#fff;z-index:99999;box-shadow:0 2px 6px rgba(0,0,0,.4);border-radius:4px;font-family:sans-serif;display:flex;flex-direction:column;}
-#tm-help{position:fixed;top:210px;left:210px;width:530px;height:340px;background:rgba(44,44,44,.87);color:#fff;z-index:99999;box-shadow:0 2px 6px rgba(0,0,0,.4);border-radius:4px;font-family:sans-serif;display:flex;flex-direction:column;}
+#tm-help{position:fixed;top:210px;left:210px;width:750px;height:500px;background:rgba(44,44,44,.87);color:#fff;z-index:99999;box-shadow:0 2px 6px rgba(0,0,0,.4);border-radius:4px;font-family:sans-serif;display:flex;flex-direction:column;}
+#tm-ed .cm-tm-kw,
+#tm-help .cm-tm-kw { color:#FFD166; font-weight:bold; }
+#tm-ed .ctrl .b:hover { background:#444; color:#fff; }
 `;
     document.head.appendChild(Object.assign(document.createElement('style'), { textContent: css }));
 
@@ -942,6 +1108,22 @@
 
         const ls = ed.querySelector('#ls');
         const editors = new WeakMap();
+        const cmQueue = [];
+        let idleToken = null;
+
+        const rIdle = window.requestIdleCallback || (cb => setTimeout(() => cb({timeRemaining:() => 0}), 80));
+
+        function queueCM(row){ cmQueue.push(row); if(!idleToken) idleToken = rIdle(runQueue,{timeout:500}); }
+
+        function runQueue(deadline){
+            let count = 0;
+            while(cmQueue.length && (deadline.timeRemaining() > 5) && count < 3) {
+                createCM(cmQueue.shift());
+                count++;
+            }
+            if(cmQueue.length) { idleToken = rIdle(runQueue,{timeout:500}); }
+            else{ idleToken = null; }
+        }
 
         function createCM(row) {
             row.classList.remove('pending-cm');
@@ -949,7 +1131,24 @@
             ta.style.display = 'none';
 
             const cm = CodeMirror.fromTextArea(ta, { theme: 'monokai', mode: 'javascript', lineWrapping: true });
+            cm.addOverlay(highlightPaletteKW);
             cm.setSize('100%', 'auto');
+            // ───────────────────────────────
+            const ls = row.parentElement;
+            const keepView = () =>{
+                const yInRow = cm.cursorCoords(null,'local').top;
+                const top = row.offsetTop + yInRow;
+                const bottom = top + cm.defaultTextHeight();
+                const viewTop = ls.scrollTop;
+                const viewBot = viewTop + ls.clientHeight;
+                if (top < viewTop) ls.scrollTop = top - 8;
+                else if (bottom> viewBot) ls.scrollTop = bottom - ls.clientHeight + 8;
+            };
+
+            cm.on('cursorActivity', keepView);
+            cm.on('change', keepView);
+            // ───────────────────────────────
+
             cm.on('change', () => {
                 classifyRow(row, cm.getLine(0).trim());
                 cm.setSize('100%', 'auto');
@@ -979,15 +1178,16 @@
         const addRow = (c = { label: '', lines: [] }) => {
             const row = document.createElement('div');
             row.className = 'row pending-cm';
-            row.innerHTML = `<input class="cmd-label" value="${c.label}"><textarea class="cmd-lines">${c.lines.join('\n')}</textarea><button class="b del">✕</button>`;
+            row.innerHTML = `<input class="cmd-label" value="${c.label}"><textarea class="cmd-lines">${c.lines.join('\n')}</textarea><div class="ctrl"><button class="b up" title="上へ">▲</button><button class="b down" title="下へ">▼</button><button class="b del" title="削除">✕</button></div>`;
             row.querySelector('.del').onclick = () => { editors.delete(row); row.remove(); };
+            row.querySelector('.up').onclick = () => { const prev = row.previousElementSibling; if (prev) ls.insertBefore(row, prev); };
+            row.querySelector('.down').onclick = () => { const next = row.nextElementSibling?.nextElementSibling; if (next) ls.insertBefore(row, next); else ls.appendChild(row); };
             ls.appendChild(row);
             classifyRow(row, (c.lines[0] || '').trim());
-            buildEditorsGradually();
+            queueCM(row);
         };
 
         cmds.forEach(addRow);
-        idle(buildEditorsGradually);
         ed.querySelector('#ad').onclick = () => addRow();
 
         // ----------  保存 ----------
@@ -1072,6 +1272,35 @@
     };
 
     /* ========== Help ウインドウ ========== */
+    function beautifyHelpCode () {
+        if (typeof CodeMirror !== 'function') return;
+
+        document.querySelectorAll('#tm-help pre').forEach(pre => {
+            let src = pre.textContent.replace(/^\s*\n|\n\s*$/g, '');
+
+            const indents = src.split('\n')
+            .filter(l => l.trim())
+            .map(l => l.match(/^ */)[0].length);
+            const min = Math.min(...indents, 0);
+            if (min) src = src.split('\n').map(l => l.slice(min)).join('\n');
+
+            const ta = document.createElement('textarea');
+            ta.value = src;
+            pre.replaceWith(ta);
+
+            const cm = CodeMirror.fromTextArea(ta, {
+                theme          : 'monokai',
+                mode           : 'javascript',
+                readOnly       : true,
+                lineNumbers    : false,
+                viewportMargin : Infinity,
+                lineWrapping   : true
+            });
+            cm.addOverlay(highlightPaletteKW);
+            cm.setSize('100%', 'auto');
+        });
+    }
+
     const toggleHelp = () => {
         if (hl) { hl.remove(); hl = null; return; }
 
@@ -1082,6 +1311,7 @@
         drag(hl); resz(hl);
         hl.querySelector('#x').onclick = () => { hl.remove(); hl = null; };
         document.body.appendChild(hl);
+        beautifyHelpCode();
     };
 
     /* ========== ランチャーボタン ========== */
