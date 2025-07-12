@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name              ココフォリア追加チャットパレット
-// @version           1.4.6
+// @version           1.4.7
 // @description       ココフォリア上に追加されるいい感じの追加チャットパレット
 // @author            Apocrypha
 // @match             https://ccfolia.com/rooms/*
@@ -59,6 +59,7 @@
     const AUTO_ATTR = 'data-auto-card';
     const CARD_SEL = `div.MuiPaper-root`;
     const STOP = Symbol('STOP');
+    const CM_SET = new Map();
     const BASE_API = [
         { text: 'SEnd()', label: '後続の行をスキップして即終了' },
         { text: 'Wait()', label: ' ...秒の待機 ' },
@@ -162,6 +163,7 @@
     const load = (k, d) => { try { const j = localStorage.getItem(k); return j ? JSON.parse(j) : d } catch { return d } };
     const save = (k, v) => localStorage.setItem(k, JSON.stringify(v));
     const escReg = s => s.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');
+    const varReg = s => s.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
     const idle = window.requestIdleCallback ? f => requestIdleCallback(f, { timeout: 100 }) : f => setTimeout(f, 16);
     const paletteOverlay = {
         token(stream) {
@@ -172,7 +174,7 @@
                     return 'wait-dir';
                 }
                 // ── [ ... ] スクリプトブロック -------------------
-                if (stream.peek() === '[') {
+                if (stream.peek() === '[' || stream.peek() === ']') {
                     stream.skipToEnd();
                     return 'script-block';
                 }
@@ -257,6 +259,73 @@
                     <tr>
                         <td><kbd>A</kbd></td>
                         <td>Auto スクリプト（開発中）</td>
+                    </tr>
+                </tbody>
+            </table>
+        </section>
+
+        <!-- ▽ Toolbar icons -->
+        <section data-ref="toolbar">
+            <h2>ツールバーアイコン</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th style="width:4em">アイコン</th>
+                        <th>機能</th>
+                        <th style="width:9em">同等ショートカット</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td style="text-align:center;font-size:18px">🎲</td>
+                        <td>
+                            <b>自動ダイスカードの表示 / 非表示</b><br>
+                            <code>data-auto="true"</code> が付いたカードを一括で隠し、再クリックで復帰。
+                        </td>
+                        <td>–</td>
+                    </tr>
+                    <tr>
+                        <td style="text-align:center;font-size:18px">⤒</td>
+                        <td>
+                            <b>.ccp インポート</b><br>
+                            事前にエクスポートした <code>*.ccp</code> を読み込み、<br>
+                            パレット / 変数 / Auto スクリプトを上書きします。
+                        </td>
+                        <td>–</td>
+                    </tr>
+                    <tr>
+                        <td style="text-align:center;font-size:18px">⤓</td>
+                        <td>
+                            <b>.ccp エクスポート</b><br>
+                            現在の設定をまとめて保存。ファイル名はデフォルトで<br>
+                            <code>追加チャット情報YYYY-MM-DDTHH-MM-SS.ccp</code>。
+                        </td>
+                        <td>–</td>
+                    </tr>
+                    <tr>
+                        <td style="text-align:center;font-size:18px">？</td>
+                        <td><b>ヘルプ表示 / 非表示</b></td>
+                        <td><kbd>Alt+P</kbd> → <kbd>?</kbd></td>
+                    </tr>
+                    <tr>
+                        <td style="text-align:center;font-size:18px">A</td>
+                        <td><b>Auto スクリプトウィンドウ</b>（開発中）</td>
+                        <td><kbd>A</kbd></td>
+                    </tr>
+                    <tr>
+                        <td style="text-align:center;font-size:18px">Φ</td>
+                        <td><b>変数編集ウィンドウ</b></td>
+                        <td><kbd>Alt+V</kbd></td>
+                    </tr>
+                    <tr>
+                        <td style="text-align:center;font-size:18px">⚙</td>
+                        <td><b>コマンド編集ウィンドウ</b></td>
+                        <td><kbd>Alt+O</kbd></td>
+                    </tr>
+                    <tr>
+                        <td style="text-align:center;font-size:18px">✕</td>
+                        <td><b>パレットを閉じる</b>（ウィンドウ自体は非表示に）</td>
+                        <td>–</td>
                     </tr>
                 </tbody>
             </table>
@@ -1432,6 +1501,20 @@ CCB<=50 【魔法弾】
         return [...PALETTE_DICT, ...dicExtra];
     }
 
+    function buildVarsOverlay() {
+        const names = vars.map(v => v.name).filter(Boolean);
+        if (!names.length) return null;
+        names.sort((a, b) => b.length - a.length);
+        const re = new RegExp(`\\b(?:${names.map(varReg).join('|')})\\b`);
+        return {
+            token(stream) {
+                if (stream.match(re)) return 'tm-var';
+                while (stream.next() != null && !stream.match(re, false)) {}
+                return null;
+            }
+        };
+    }
+
     CodeMirror.registerHelper('hint','palette', cm=>{
         const cur = cm.getCursor();
         const token = cm.getTokenAt(cur);
@@ -1924,7 +2007,7 @@ CCB<=50 【魔法弾】
         /* CodeMirror のキーワード着色を薄黄で強調 */
         #tm-ed   .cm-tm-kw,
         #tm-help .cm-tm-kw {
-            color       : #FFD166;
+            color       : #FFD166 !important;
             font-weight : bold;
         }
 
@@ -1935,33 +2018,44 @@ CCB<=50 【魔法弾】
         }
 
         .cm-tm-kw {
-            color       : #6cf;
+            color       : #6cf !important;
             font-weight : bold;
         }
 
         .cm-dice-cmd {
-            color       : #ffd166;
+            color       : #ffd166 !important;
             font-weight : bold;
         }
 
         .cm-param-cmd {
-            color       : #ff9e64;
+            color       : #ff9e64 !important;
             font-weight : bold;
         }
 
         .cm-slash-cmd {
-            color       : #a5d6ff;
+            color       : #a5d6ff !important;
             font-weight : bold;
         }
 
         .cm-wait-dir {
-            color      : #ffb300;
-            background : rgba(255, 200, 0, .10);
+            color       : #ffb300 !important;
+            font-weight : bold;
+            background  : rgba(255, 200, 0, .10);
+        }
+
+        .cm-tm-var {
+            color       : #c792ea !important;
+            font-weight : bold;
         }
 
         .cm-script-block {
-            color      : #4aaaff;
-            background : rgba(80, 180, 255, .10);
+            color       : #4aaaff;
+            font-weight : bold;
+            background  : rgba(80, 180, 255, .10);
+        }
+
+        .CodeMirror span.cm-string-2 {
+            color : #e6db74 !important;
         }
 
         .cm-hint-own .cm-hint-main {
@@ -2057,7 +2151,6 @@ CCB<=50 【魔法弾】
         document.body.appendChild(ed);
 
         const ls = ed.querySelector('#ls');
-        const editors = new WeakMap();
         const cmQueue = [];
         let idleToken = null;
 
@@ -2094,6 +2187,8 @@ CCB<=50 【魔法弾】
             });
             cm.addOverlay(highlightPaletteKW);
             cm.addOverlay(paletteOverlay);
+            const varOv = buildVarsOverlay();
+            if (varOv) cm.addOverlay(varOv);
             cm.setSize('100%', 'auto');
             // ───────────────────────────────
             const ls = row.parentElement;
@@ -2120,7 +2215,7 @@ CCB<=50 【魔法弾】
                     }), 0);
                 }
             });
-            editors.set(row, cm);
+            CM_SET.set(row, cm);
             classifyRow(row, cm.getLine(0).trim());
         }
 
@@ -2146,7 +2241,7 @@ CCB<=50 【魔法弾】
             const row = document.createElement('div');
             row.className = 'row pending-cm';
             row.innerHTML = `<input class="cmd-label" value="${c.label}"><textarea class="cmd-lines">${c.lines.join('\n')}</textarea><div class="ctrl"><button class="b up" title="上へ">▲</button><button class="b down" title="下へ">▼</button><button class="b del" title="削除">✕</button></div>`;
-            row.querySelector('.del').onclick = () => { editors.delete(row); row.remove(); };
+            row.querySelector('.del').onclick = () => { CM_SET.delete(row); row.remove(); };
             row.querySelector('.up').onclick = () => { const prev = row.previousElementSibling; if (prev) ls.insertBefore(row, prev); };
             row.querySelector('.down').onclick = () => { const next = row.nextElementSibling?.nextElementSibling; if (next) ls.insertBefore(row, next); else ls.appendChild(row); };
             ls.appendChild(row);
@@ -2160,7 +2255,7 @@ CCB<=50 【魔法弾】
         ed.querySelector('#sv').onclick = () => {
             cmds = [...ls.querySelectorAll('.row')].map(row => {
                 const label = row.querySelector('.cmd-label').value.trim();
-                const srcTxt = editors.has(row) ? editors.get(row).getValue() : row.querySelector('.cmd-lines').value;
+                const srcTxt = CM_SET.has(row) ? CM_SET.get(row).getValue() : row.querySelector('.cmd-lines').value;
                 const lines = srcTxt.split(/\r?\n/).map(l => l.replace(/\s+$/, '')).filter((l, i, a) => !((i === 0 || i === a.length - 1) && l === ''));
                 while (lines[0] !== undefined && lines[0].trim() === '') lines.shift();
                 while (lines[lines.length - 1] !== undefined && lines[lines.length - 1].trim() === '') lines.pop();
@@ -2183,22 +2278,33 @@ CCB<=50 【魔法弾】
                             <div class="dock"><button class="b add" id="ad">■ 追加</button><button class="b save" id="sv">■ 保存</button></div>
                             <div class="rs"></div>`;
         drag(vr); resz(vr);
+        function refreshAllEditorsVarOverlay(){
+            const newOv = buildVarsOverlay();
+            CM_SET.forEach(cm=>{
+                cm.getAllOverlays()
+                    .filter(o=>o.token && o.token.name==='tm-var')
+                    .forEach(o=>cm.removeOverlay(o));
+                if(newOv) cm.addOverlay(newOv);
+            });
+        }
         const vl = vr.querySelector('#vl');
         const addRow = (v = { name: '', value: '' }) => {
             const r = document.createElement('div'); r.className = 'row';
             r.innerHTML = `<input placeholder="名前" value="${v.name}">
                                <input placeholder="値"   value="${v.value}">
                                <button class="b del">✕</button>`;
-                r.querySelector('.del').onclick = () => r.remove();
-                vl.appendChild(r);
-            };
+            r.querySelector('.del').onclick = () => r.remove();
+            vl.appendChild(r);
+        };
         vars.forEach(addRow);
         vr.querySelector('#ad').onclick = () => addRow();
         vr.querySelector('#sv').onclick = () => {
             vars = [...vl.querySelectorAll('.row')].map(r => {
                 const [n, v] = r.querySelectorAll('input'); return { name: n.value.trim(), value: v.value.trim() };
             }).filter(o => o.name);
-            save(VAR_KEY, vars); vr.remove(); vr = null;
+            save(VAR_KEY, vars);
+            refreshAllEditorsVarOverlay();
+            vr.remove(); vr = null;
         };
         vr.querySelector('#x').onclick = () => { vr.remove(); vr = null; };
         document.body.appendChild(vr);
