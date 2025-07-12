@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name              ココフォリア追加チャットパレット
-// @version           1.4.5
+// @version           1.4.6
 // @description       ココフォリア上に追加されるいい感じの追加チャットパレット
 // @author            Apocrypha
 // @match             https://ccfolia.com/rooms/*
@@ -1793,7 +1793,7 @@ CCB<=50 【魔法弾】
             top            : 0;
             right          : 0;
             display        : flex;
-            flex-direction : column;
+            flex-direction : row;
             gap            : 2px;
             grid-column    : 2;
         }
