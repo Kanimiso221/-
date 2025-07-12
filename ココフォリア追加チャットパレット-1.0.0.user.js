@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name              ココフォリア追加チャットパレット
-// @version           1.4.7
+// @version           1.4.8
 // @description       ココフォリア上に追加されるいい感じの追加チャットパレット
 // @author            Apocrypha
 // @match             https://ccfolia.com/rooms/*
@@ -2278,13 +2278,16 @@ CCB<=50 【魔法弾】
                             <div class="dock"><button class="b add" id="ad">■ 追加</button><button class="b save" id="sv">■ 保存</button></div>
                             <div class="rs"></div>`;
         drag(vr); resz(vr);
-        function refreshAllEditorsVarOverlay(){
+        function refreshAllEditorsVarOverlay() {
             const newOv = buildVarsOverlay();
-            CM_SET.forEach(cm=>{
-                cm.getAllOverlays()
-                    .filter(o=>o.token && o.token.name==='tm-var')
-                    .forEach(o=>cm.removeOverlay(o));
-                if(newOv) cm.addOverlay(newOv);
+            CM_SET.forEach(cm => {
+                if (cm.state.varOverlay) cm.removeOverlay(cm.state.varOverlay);
+                if (newOv) {
+                    cm.addOverlay(newOv);
+                    cm.state.varOverlay = newOv;
+                } else {
+                    delete cm.state.varOverlay;
+                }
             });
         }
         const vl = vr.querySelector('#vl');
