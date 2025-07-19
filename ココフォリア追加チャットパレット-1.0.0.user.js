@@ -19,8 +19,6 @@
 // @require           https://cdn.jsdelivr.net/npm/codemirror@5/addon/edit/matchbrackets.js
 // @require           https://cdn.jsdelivr.net/npm/codemirror@5/addon/hint/show-hint.js
 // @require           https://cdn.jsdelivr.net/npm/codemirror@5/addon/hint/javascript-hint.js
-// @require           https://cdn.jsdelivr.net/npm/marked/marked.min.js
-// @require           https://cdn.jsdelivr.net/npm/dompurify@3.1.0/dist/purify.min.js
 // @resource CM_BASE  https://cdn.jsdelivr.net/npm/codemirror@5/lib/codemirror.css
 // @resource CM_MONO  https://cdn.jsdelivr.net/npm/codemirror@5/theme/monokai.css
 // @resource CM_FOLD  https://cdn.jsdelivr.net/npm/codemirror@5/addon/fold/foldgutter.css
@@ -30,6 +28,7 @@
 // @license           MIT
 // ==/UserScript==
 
+/* global CodeMirror */
 /* eslint no-return-assign: 0 */
 
 (() => {
@@ -49,8 +48,6 @@
     const HK_VIEW = 'p', HK_EDIT = 'o', HK_VARS = 'v';
     const SEND_DELAY = 500;
     const CACHE_SPAN = 12_000;
-    const ROW_STAT = 'div[data-testid="CharacterStatus__row"]';
-    const ROW_PARAM = 'div[data-testid="CharacterParam__row"]';
     const CHAT_CACHE = 50;
     const KW_ALIAS = { 'M': /失敗/, 'S': /(?<!決定的)成功|(?<!決定的成功\/)スペシャル/, 'F': /致命的失敗/, '100F': /(100.*致命的失敗|致命的失敗.*100)/, 'C': /(クリティカル|決定的成功(?:\/スペシャル)?)/, '1C': /(1.*(?:クリティカル|決定的成功)|(?:クリティカル|決定的成功).*1)/ };
     const CONF_MIME = 'application/x-ccp+json';
@@ -60,6 +57,7 @@
     const CARD_SEL = `div.MuiPaper-root`;
     const STOP = Symbol('STOP');
     const CM_SET = new Map();
+    const SEEN_RC_IDX = new Set();
     const BASE_API = [
         { text: 'SEnd()', label: '後続の行をスキップして即終了' },
         { text: 'Wait()', label: ' ...秒の待機 ' },
@@ -750,7 +748,6 @@ CCB<=50 【魔法弾】
     let vars = load(VAR_KEY, DEF_VARS);
     let winPos = load(POS_KEY, {});
     let autoCmd = load(AUTO_KEY, ['// Auto script here\n(まだ何も出来ないよ)']);
-    let hl = null;
     let hideAutoCards = true;
     let autoAst = [];
     let autoTicker = null;
@@ -775,7 +772,7 @@ CCB<=50 【魔法弾】
             return body ? body.innerText.trim() : '';
         });
     };
-    const wrapMessages = arr => arr.map(txt => {
+    const wrapMessages = (arr, ctx) => arr.map(txt => {
         const Find = kw => (KW_ALIAS[kw] ?? new RegExp(escReg(kw))).test(txt);
         const Lines = () => txt.split(/\\r?\\n/);
         const FindAt = kw => {
@@ -786,7 +783,7 @@ CCB<=50 【魔法弾】
         const Match = re => (typeof re === 'string' ? txt.match(new RegExp(re)) : txt.match(re));
         const MatchAll = re => { if (typeof re === 'string') re = new RegExp(re, 'g'); if (!re.global) re = new RegExp(re.source, re.flags + 'g'); return [...txt.matchAll(re)]; };
         const GetNum = () => { const m = txt.match(/＞\s*(-?\d+(?:\.\d+)?)/); return m ? Number(m[1]) : NaN; };
-        return { text: txt, Find, Lines, Match, MatchAll, FindAt, GetNum, Send: (...lines) => enqueueSend(lines.flat()) };
+        return { text: txt, Find, Lines, Match, MatchAll, FindAt, GetNum, Send: (...lines) => enqueueSend(lines.flat(), ctx) };
     });
 
     /* ========== キャラクターボックスの値取得 ========== */
@@ -839,7 +836,22 @@ CCB<=50 【魔法弾】
     window.Actor = Actor;
 
     //  ==== ウェイトヘルパ =========================
-    function Wait(ms){ queue(() => sleep(Number(ms))); }
+    function Wait(ms){ return new Promise(res => setTimeout(res, Number(ms))); }
+
+    function preprocessWait(src){
+        const store = [];
+        const push = m => { store.push(m); return `__KEEP${store.length-1}__`; };
+        src = src
+            .replace(/(['"`])(?:\\.|(?!\1).)*\1/g, push)
+            .replace(/\/\/[^\n]*/g, push)
+            .replace(/\/\*[\s\S]*?\*\//g, push);
+        src = src.replace(/(^|[^\w$])(Wait\s*\()/g, (m, pre, rest) => {
+            if(/\bawait\s*$/.test(pre)) return m;
+            return pre + 'await ' + rest;
+        });
+        src = src.replace(/__KEEP(\d+)__/g, (_,i)=>store[+i]);
+        return src;
+    }
 
     /* ========== 共通パーサ ========== */
     function __splitVal(val){
@@ -900,16 +912,15 @@ CCB<=50 【魔法弾】
     const expRec = (s, d) => { let p; do { p = s; s = expOnce(s, d); } while (s !== p); return s; };
 
     /* ========== スクリプト行実行 ========== */
-    const runScript = (code, ctx) => {
+    const runScript = async (code, ctx) => {
         try {
-            // ミニ JS 方言: ctx を with でバインド
-            const fn = new Function('ctx', `with(ctx){${code}}`);
-            fn(ctx);
-        } catch (e) {
+            code = preprocessWait(code);
+            const fn = new Function('ctx', `return (async () => {with(ctx){${code}}})();`);
+            await fn(ctx);
+        } catch(e) {
             if (e === STOP) throw STOP;
-            alert('[ScriptError]' + e);
-            console.error('[ScriptError]' + e);
-            return;
+            alert('[ScriptError] ' + e);
+            console.error('[ScriptError]', e);
         }
     };
 
@@ -952,9 +963,12 @@ CCB<=50 【魔法弾】
             m = txt.match(/^\[\s*WAIT\s+(\d+)\s*\]$/);
             if(m){ await sleep(+m[1]); return; }
 
-            if(txt.startsWith('[') && txt.endsWith(']')){ runScript(txt.slice(1,-1), ctx); return; }
+            if(txt.startsWith('[') && txt.endsWith(']')){ await runScript(txt.slice(1,-1), ctx); return; }
 
-            const expanded = expRec(chunk,{ ...Object.fromEntries(Object.entries(ctx).map(([k,v])=>[k,String(Math.trunc(v))])) });
+            const expanded = expRec(chunk, {
+                ...Object.fromEntries(Object.entries(ctx)
+                                      .map(([k,v]) => [k, (typeof v === 'number' ? String(Math.trunc(v)) : String(v))]))
+            });
             if(!expanded) return;
 
             const ta = await wait(TXT_SEL);
@@ -966,435 +980,41 @@ CCB<=50 【魔法弾】
         }
     }
 
-    function enqueueSend(rawLines){
-        const ctx = varsObj();
-        Object.defineProperties(ctx,{
-            SEnd          : { value: () => { throw STOP; }, writable: false },
-            CMessage      : { get  : () => wrapMessages(getLastMessages()) },
-            CharBox       : { value: CharBox, writable: false, enumerable: false },
-            CharBoxMax    : { value: CharBoxMax, enumerable: false },
-            CharBoxRaw    : { value: CharBoxRaw, enumerable: false },
-            CharBoxNumber : { value: CharBoxNumber, enumerable: false },
-            Actor         : { value: Actor, writable: false },
-            Wait          : { value: Wait, writable: false },
-            LoadNames     : { value: LoadNames, writable: false },
-        });
+    function enqueueSend(rawLines, existingCtx){
+        const isNested = !!existingCtx;
+        const ctx = existingCtx || varsObj();
+
+        if(!ctx.__ctxTagged){
+            Object.defineProperties(ctx,{
+                __ctxTagged    : { value: true },
+                SEnd           : { value: () => { throw STOP; } },
+                CMessage       : { get  : () => wrapMessages(getLastMessages(), ctx) },
+                CharBox        : { value: CharBox },
+                CharBoxMax     : { value: CharBoxMax },
+                CharBoxRaw     : { value: CharBoxRaw },
+                CharBoxNumber  : { value: CharBoxNumber },
+                Actor          : { value: Actor },
+                Wait           : { value: Wait },
+                LoadNames      : { value: LoadNames },
+            });
+        }
+
         const chunks = chunkLines(rawLines);
 
         return queue(async () => {
             for (let i = 0; i < chunks.length; i++){
                 try{
                     await processOneChunk(chunks[i], ctx);
+                    if(ctx.__stop) break;
                 } catch(e) {
                     if (e === STOP) break;
                     throw e;
                 }
             }
-            saveVarsObj(ctx);
+            // トップレベルのみ最終保存
+            if(!isNested) saveVarsObj(ctx);
         });
     }
-
-    /* ========== ランタイム環境（変数テーブル） ========== */
-    const RT = {
-        /* ① 変数テーブル（ユーザ変数） */
-        vars: Object.create(null),
-
-        /* ② 組込み数学関数 */
-        funcs: {
-            max: Math.max,
-            min: Math.min,
-            clamp: (x, lo, hi) => Math.min(Math.max(x, lo), hi),
-            abs:  Math.abs,
-            ceil: Math.ceil,
-            floor: Math.floor,
-            print: console.log
-        },
-
-        roomchat: (() => {
-            /** 内部ヘルパ：最新 n 件の wrap 済みメッセージ配列を返す */
-            const latest = (n = CHAT_CACHE) => wrapMessages(getLastMessages(n));
-
-            return {
-                /** .at(idx) ─ 0=直近, 1=1つ前 … の Message オブジェクト */
-                at          : idx => latest(idx + 1)[idx] ?? { text: '' },
-
-                /** .contents(kw) ─ 直近ログ群に kw が含まれるか */
-                contents    : kw => latest().some(m => m.Find(kw)),
-
-                /** .contents_at(kw) ─ 直近ログ 1 件で kw の出現数 */
-                contents_at : kw => latest(1)[0]?.FindAt(kw) ?? 0,
-
-                /** .send(txt) ─ チャットへ送信 */
-                send        : txt => enqueueSend([txt]),
-
-                /** .num() ─ 直近ログから「＞ 123」形式の数値を取得 */
-                num         : () => latest(1)[0]?.GetNum() ?? NaN
-            };
-        })()
-    };
-
-    /* ========== GUI から変数を取り込む ========== */
-    function buildRTfromGui() {
-        RT.vars = Object.create(null);
-        vars.forEach(v => {
-            const n = v.name;
-            const raw = v.value.trim();
-            RT.vars[n] = {
-                value: (/^\d+$/.test(raw) ? Number(raw) : raw),
-                type : v.type ?? 'int'
-            };
-        });
-    }
-
-    /* ========== 字句解析（Tokenizer）========== */
-    function tokenize(src) {
-        const TOK_PATTERNS = [
-            '\\/\\*[^]*?\\*\\/',
-            '\\/\\/[^\\n\\r]*',
-            '\\s+',
-            '"(?:[^"\\\\]|\\\\.)*"',
-            '\\d+\\.\\d+','\\d+',
-            '\\|\\||&&|==|!=|<=|>=|\\+\\+|--|\\+=|-=|\\*=|\\/=|%=',
-            '[A-Za-z_]\\w*',
-            '[(){};,.+\\-*/%<>=|&?:]'
-        ];
-        const TOKEN_RE = new RegExp(TOK_PATTERNS.join('|'), 'g');
-        const out = [];
-        let m;
-        while ((m = TOKEN_RE.exec(src))) {
-            const tk = m[0];
-            if (/^\s+$/.test(tk) || tk.startsWith('/*') || tk.startsWith('//')) continue;
-            out.push(tk);
-        }
-        return out;
-    }
-
-    /* ========== 構文パーサー ========== */
-    function parse(tokens) {
-        let i = 0;
-        const peek = () => tokens[i], next = () => tokens[i++];
-        const expect = t => {
-            const got = next();
-            if (got !== t) {
-                alert('期待:', t, ' でも実際は', got, ' 残り', tokens.slice(i));
-                throw `期待: ${t}`;
-            }
-        };
-
-        const prog = [];
-        function parseExpr() {
-            let node = parseAnd();
-            while (peek() === '||') {
-                const op = next();
-                const rhs = parseAnd();
-                node = { kind:'bin', op, lhs:node, rhs };
-            }
-            return node;
-        }
-        function parseAnd() {
-            let node = parseEquality();
-            while (peek() === '&&') {
-                const op = next();
-                const rhs = parseEquality();
-                node = { kind:'bin', op, lhs:node, rhs };
-            }
-            return node;
-        }
-        function parseEquality() {
-            let node = parseAdditive();
-            while (['==','!=','<','>','<=','>='].includes(peek())) {
-                const op = next();
-                const rhs = parseAdditive();
-                node = { kind:'bin', op, lhs:node, rhs };
-            }
-            return node;
-        }
-        function parseAdditive() {
-            let node = parseTerm();
-            while (['+','-'].includes(peek())) {
-                const op = next();
-                const rhs = parseTerm();
-                node = { kind:'bin', op, lhs:node, rhs };
-            }
-            return node;
-        }
-        function parseTerm() {
-            let lhs = parseFactor();
-            while (['*', '/', '%'].includes(peek())) {
-                const op = next(), rhs = parseFactor();
-                lhs = { kind: 'bin', op, lhs, rhs };
-            }
-            return lhs;
-        }
-        function parseStmt() {
-            const tk = peek();
-
-            if (['int','float','string','array','readonly','const','memory'].includes(tk)) {
-                let attr = { ro:false, const:false, mem:false };
-                while (['readonly','const','memory'].includes(peek())) {
-                    const w = next();
-                    if (w==='readonly') attr.ro = true;
-                    if (w==='const') attr.const = true;
-                    if (w==='memory') attr.mem = true;
-                }
-                const type = next();
-                const name = next();
-                let init = null;
-                if (peek() === '='){ next(); init = parseExpr(); }
-                expect(';');
-                return { kind:'decl', type, name, init, attr };
-            }
-
-            if (tk === 'if') {
-                next(); expect('('); const cond = parseExpr(); expect(')');
-                const body = parseBlock();
-                return { kind: 'if', cond, body };
-            }
-
-            if (tk === 'while') {
-                next(); expect('('); const cond =parseExpr(); expect(')');
-                const body = parseBlock();
-                return { kind: 'while', cond, body };
-            }
-
-            if (tk === 'for') {
-                next(); expect('(');
-                const init = parseExpr(); expect(';');
-                const cond = parseExpr(); expect(';');
-                const step = parseExpr(); expect(')');
-                const body = parseBlock();
-                return { kind: 'for', init, cond, step, body };
-            }
-
-            if (tk === 'do') {
-                next();
-                const body = parseBlock();
-                expect('while'); expect('('); const cond = parseExpr(); expect(')'); expect(';');
-                return { kind: 'do', cond, body };
-            }
-
-            if (tk === 'switch') {
-                next(); expect('('); const expr = parseExpr(); expect(')');
-                expect('{'); const cases = [];
-                while (peek() !== '}') {
-                    expect('case'); const val = parseExpr(); expect(':');
-                    const body = []; while (peek() !== 'case' && peek() !== '}'){
-                        body.push(parseExpr()); expect(';');
-                    }
-                    cases.push({val,body});
-                } expect('}');
-                return { kind: 'switch', expr, cases};
-            }
-
-            if (tk === 'trigger') {
-                next(); expect('('); const cond = parseExpr(); expect(')');
-                const body = parseBlock();
-                return { kind: 'trigger', cond, body, runned: false};
-            }
-
-            const expr = parseExpr();
-            expect(';');
-            return { kind:'expr', expr };
-        }
-        function parseBlock() {
-            expect('{');
-            const body = [];
-            while (peek() !== '}') body.push(parseStmt());
-            expect('}');
-            return body;
-        }
-        function parseFactor() {
-            if (peek() === '++' || peek() === '--') {
-                const op = next();
-                const expr = parseFactor();
-                return { kind: 'unary', op, pre: true, expr };
-            }
-
-            let node;
-            const tk = next();
-
-            if (tk === '(') { node = parseExpr(); expect(')'); }
-            else if (/^\d/.test(tk)) { node = { kind: 'num', val: +tk }; }
-            else if (/^"/.test(tk)) { node = { kind: 'str', val: tk.slice(1, -1) }; }
-            else { node = { kind: 'var', name: tk }; }
-
-            while (true) {
-                if (peek() === '++' || peek() === '--') {
-                    const op = next();
-                    node = { kind: 'unary', op, pre: false, expr: node };
-                } else if (peek() === '.') {
-                    next();
-                    const prop = next();
-                    node = { kind: 'prop', obj: node, prop };
-                } else if (peek() === '(') {
-                    next();
-                    const args = [];
-                    if (peek() !== ')') {
-                        args.push(parseExpr());
-                        while (peek() === ',') { next(); args.push(parseExpr()); }
-                    }
-                    expect(')');
-                    node = { kind: 'call', func: node, args };
-                } else break;
-            }
-            return node;
-        }
-
-
-        while (i < tokens.length) { prog.push(parseStmt()); }
-
-        return prog;
-    }
-
-    /* ========== インタープリタ ========== */
-    function evalNode(node, env) {
-        switch (node.kind) {
-            case 'num': return node.val;
-            case 'str': return node.val;
-            case 'var': {
-                const n = node.name;
-                if (n in env) return env[n];
-                if (n in env.funcs) return env.funcs[n];
-                if (n in env.vars) return env.vars[n].value;
-                return 0;
-            }
-            case 'bin': {
-                const l = evalNode(node.lhs, env);
-                switch (node.op) {
-                    case '<' : return l < evalNode(node.rhs, env);
-                    case '>' : return l > evalNode(node.rhs, env);
-                    case '<=': return l <= evalNode(node.rhs, env);
-                    case '>=': return l >= evalNode(node.rhs, env);
-                    case '+': return l + evalNode(node.rhs, env);
-                    case '-': return l - evalNode(node.rhs, env);
-                    case '*': return l * evalNode(node.rhs, env);
-                    case '/': return l / evalNode(node.rhs, env);
-                    case '%': return l % evalNode(node.rhs, env);
-                    case '==': return l == evalNode(node.rhs, env);
-                    case '!=': return l != evalNode(node.rhs, env);
-                    case '||': return l || evalNode(node.rhs, env);
-                    case '&&': return l && evalNode(node.rhs, env);
-                } break;
-            }
-            case 'prop': return evalNode(node.obj, env)[node.prop];
-            case 'assign': {
-                const name=node.lhs.name;
-                const v = env.vars[name];
-                if (v?.attr?.ro || v?.attr?.const) throw `書換禁止 ${name}`;
-                if (!(name in env.vars) && (name in env || name in env.funcs)) { alert(`組込み名 ${name} は書き換え禁止`); throw `組込み名 ${name} は書き換え禁止`; }
-                const cur = env.vars[name]?.value ?? 0;
-                const rhs = evalNode(node.rhs, env);
-
-                let val;
-                switch (node.op) {
-                    case '=': val = rhs; break;
-                    case '+=': val = cur + rhs; break;
-                    case '-=': val = cur - rhs; break;
-                    case '*=': val = cur * rhs; break;
-                    case '/=': val = cur / rhs; break;
-                    case '%=': val = cur % rhs; break;
-                }
-                env.vars[name] = { value: val, type: 'int' };
-                return val;
-            }
-            case 'call': {
-                const fn = evalNode(node.func, env);
-                if (typeof fn !== 'function' ||
-                    fn === Function || fn === Function.prototype) {
-                    throw `呼び出し禁止: unsafe function`;
-                }
-                const banned = [eval, setTimeout, setInterval, Function];
-                if (banned.includes(fn)) throw `呼び出し禁止: ${fn.name}`;
-
-                const args = node.args.map(a => evalNode(a, env));
-                return fn.apply(null, args);
-            }
-            case 'decl': {
-                env.vars[node.name] = { value: node.init ? evalNode(node.init, env) : 0, type: node.type };
-                return;
-            }
-            case 'expr': evalNode(node.expr, env); return;
-            case 'if':
-                if (evalNode(node.cond, env)) node.body.forEach(n => evalNode(n, env));
-                return;
-            case 'trigger':
-                if (!node.runned && evalNode(node.cond, env)) {
-                    node.runned = true;
-                    node.body.forEach(n => evalNode(n, env));
-                }
-                return;
-            case 'unary': {
-                const n = node.expr.name;
-                const cur = env.vars[n]?.value ?? 0;
-                const val = node.op==='++' ? cur+1 : cur-1;
-                env.vars[n].value = val;
-                return node.pre ? val : cur;
-            }
-            case 'while':
-                while (evalNode(node.cond,env)) node.body.forEach(n=>evalNode(n,env));
-                return;
-            case 'for':
-                evalNode(node.init,env);
-                while (evalNode(node.cond,env)) {
-                    node.body.forEach(n=>evalNode(n,env));
-                    evalNode(node.step,env);
-                } return;
-            case 'do':
-                do { node.body.forEach(n=>evalNode(n,env)); }
-                while (evalNode(node.cond,env));
-                return;
-            case 'switch': {
-                const v=evalNode(node.expr,env);
-                for (const c of node.cases){
-                    if (evalNode(c.val,env)===v){
-                        c.body.forEach(n=>evalNode(n,env));
-                        break;
-                    }
-                } return;
-            }
-        }
-    }
-
-    function syncVarsToStorage(){
-        for (const [k,v] of Object.entries(RT.vars)){
-            if (v.attr?.mem){
-                GM_setValue('mem_'+k, JSON.stringify(v.value));
-            }
-        }
-        // 普通の vars も保存するならここで…
-    }
-
-    function restoreMemory(){
-        for (const k of GM_listValues()){
-            if (k.startsWith('mem_')){
-                const name = k.slice(4);
-                RT.vars[name]={value:JSON.parse(GM_getValue(k)),type:'int',attr:{mem:true}};
-            }
-        }
-    }
-
-    /* ========== Auto 実行ループ＋メモリリーク対策 ========== */
-    function startAutoLoop() { if (autoTicker || au) return; if (!autoAst.length) return; autoTicker = setInterval(runAuto, 200); }
-
-    function stopAutoLoop() { if (autoTicker) { clearInterval(autoTicker); autoTicker = null; } }
-
-    function runAuto () {
-        if (au) return;
-        for (const n of autoAst) {
-            if (n.kind === 'trigger') {
-                if (!n.runned && evalNode(n.cond, RT)) {
-                    n.runned = true;
-                    n.body.forEach(b => evalNode(b, RT));
-                }
-            } else if (n.kind !== 'decl') {
-                evalNode(n, RT);
-            }
-        }
-        syncVarsToStorage();
-    }
-
-    /* タブが非表示になったら停止 → 戻ったら再開 */
-    document.addEventListener('visibilitychange', () => { if (document.hidden || au) stopAutoLoop(); else startAutoLoop(); });
 
     /* ========== 設定オブジェクト ========== */
     function collectConfig() { return { version: CONF_VER, cmds: cmds, vars: vars, autoCmd: autoCmd } }
@@ -1466,10 +1086,8 @@ CCB<=50 【魔法弾】
         }
     }
 
-    // ―― 既存カードを一斉チェック
     document.querySelectorAll(CARD_SEL).forEach(markAndToggle);
 
-    // ―― 新着カードを監視
     new MutationObserver(muts => {
         muts.forEach(m => {
             m.addedNodes.forEach(n => {
@@ -1480,20 +1098,37 @@ CCB<=50 【魔法弾】
         });
     }).observe(document.body, { childList: true, subtree: true });
 
-    /* Alt + R で表示/非表示トグル ----------------------- */
-    document.addEventListener('keydown', e => {
-        if (e.altKey && !e.ctrlKey && !e.shiftKey && e.key.toLowerCase() === 'r') {
-            hideAutoCards = !hideAutoCards;
-            document.querySelectorAll(`${CARD_SEL}[${AUTO_ATTR}]`)
-                .forEach(el => {
-                el.style.display =
-                    (hideAutoCards && el.getAttribute(AUTO_ATTR) === 'true')
-                    ? 'none' : '';
-            });
-        }
-    });
+    /* ========== 簡易確認ダイアログ ========== */
+    function askDiscard(cb){
+        if (document.getElementById('tm-confirm')) return;
+        const box = document.createElement('div');
+        box.id = 'tm-confirm';
+        box.innerHTML = `<div class="cf-back"></div><div class="cf-panel"><p>変更が保存されていません。<br>破棄して閉じますか？</p><footer><button class="cf-ok">破棄して閉じる</button><button class="cf-cancel">戻る</button></footer></div>`;
+        document.body.appendChild(box);
+        box.querySelector('.cf-ok').onclick = () => { box.remove(); cb(true); };
+        box.querySelector('.cf-cancel').onclick = () => { box.remove(); cb(false); };
+        const onKey = e => { if (e.key === 'Escape'){ box.remove(); cb(false); } };
+        document.addEventListener('keydown', onKey, { once:true });
+    }
 
     /* ========== CodeMirrorの補完を動かせるように設定 ========== */
+    function beautifyHelpCode () {
+        if (typeof CodeMirror === 'undefined') return;
+        hl.querySelectorAll('#tm-help-article pre').forEach(pre => {
+            const cm = CodeMirror(function(elt){
+                pre.replaceWith(elt);
+            },{
+                value : pre.textContent,
+                mode  : 'javascript',
+                theme : 'monokai',
+                readOnly : true,
+                lineNumbers : true,
+                viewportMargin : Infinity
+            });
+            cm.getScrollerElement().style.background = '#1e1e1e';
+        });
+    }
+
     function buildWordList(){
         const varNames = vars.map(v => v.name);
         const kw_alias = Object.keys(KW_ALIAS||{});
@@ -1613,25 +1248,10 @@ CCB<=50 【魔法弾】
         #tm-var {  /* 変数エディタ                   */
             top        : 120px;
             left       : 120px;
-            width      : 350px;
+            width      : 370px;
             min-width  : 280px;
             max-height : 70vh;
             overflow   : auto;
-        }
-        #tm-au {  /* オートメーション                */
-            position       : fixed;
-            top            : 180px;
-            left           : 180px;
-            width          : 400px;
-            height         : 280px;
-            background     : rgba(44,44,44,.87);
-            color          : #fff;
-            z-index        : 1200;
-            box-shadow     : 0 2px 6px rgba(0,0,0,.4);
-            border-radius  : 4px;
-            font-family    : sans-serif;
-            display        : flex;
-            flex-direction : column;
         }
         #tm-help {  /* ヘルプ                        */
             position       : fixed;
@@ -1873,27 +1493,34 @@ CCB<=50 【魔法弾】
         }
         .row .ctrl {
             position       : absolute;
-            top            : 0;
-            right          : 0;
+            top            : 1px;
+            right          : 2px;
             display        : flex;
             flex-direction : row;
-            gap            : 2px;
+            gap            : 4px;
             grid-column    : 2;
         }
         .row .ctrl .b {
-            width       : 22px;
-            background  : #555;
-            color       : #ccc;
-            line-height : 18px;
-            padding     : 0;
+          display         : inline-flex;
+          align-items     : center;
+          justify-content : center;
+          width           : 22px;
+          height          : 22px;
+          padding         : 0;
+          font-size       : 13px;
+          line-height     : 1;
+          border          : none;
+          border-radius   : 4px;
+          background      : #555;
+          color           : #ccc;
+          cursor          : pointer;
+          transition      : filter .15s ease, transform .08s ease;
         }
-        .row .ctrl .b:hover {
-            color  : #fff;
-            filter : brightness(1. 2);
-        }
-        .row .ctrl .del {
-            background : #833;
-        }
+        .row .ctrl .b:hover   { color : #fff; filter : brightness(1.15); }
+        .row .ctrl .b:active  { transform : translateY(1px); }
+        .row .ctrl .del { background : #833; }
+        .row .ctrl .up,
+        .row .ctrl .down { background : #444; }
         .row textarea {
             resize        : none;
             overflow      : hidden;
@@ -1905,20 +1532,50 @@ CCB<=50 【魔法弾】
             padding       : 4px;
             font-size     : 12px;
         }
-        .row input {
-            flex          : 1;
-            padding       : 4px;
-            font-size     : 12px;
-            background    : #555;
-            border        : 1px solid #777;
-            border-radius : 2px;
-            color         : #fff;
-            grid-column   : 1;
-            padding       : 4px;
-            resize        : none;
-        }
         .row input.cmd-label {
-            width : 100%;
+          flex          : 1 1 auto;
+          min-width     : 0;
+          margin-right  : 80px;
+          height        : 24px;
+          line-height   : 24px;
+          padding       : 0 8px;
+          padding-right : 88px;
+          background    : #555;
+          border        : 1px solid #777;
+          border-radius : 4px;
+          color         : #fff;
+          box-sizing    : border-box;
+          font-size     : 13px;
+          font-weight   : 600;
+          white-space   : nowrap;
+          overflow-x    : auto;
+        }
+        .row input.cmd-label:focus {
+          outline        : 2px solid #a0d8ff;
+          outline-offset : 1px;
+        }
+        /* 変数エディタ用 1 行 */
+        .var-row {
+          display               : grid;
+          grid-template-columns : 120px 1fr 28px;
+          align-items           : center;
+          gap                   : 6px;
+        }
+        /* 2 つの入力欄共通 */
+        .var-row input {
+          height        : 26px;
+          padding       : 0 8px;
+          background    : #555;
+          border        : 1px solid #777;
+          border-radius : 4px;
+          color         : #fff;
+          font-size     : 13px;
+          font-weight   : 600;
+          box-sizing    : border-box;
+        }
+        .var-row input:focus {
+          outline        : 2px solid #a0d8ff;
+          outline-offset : 1px;
         }
 
         /* ───────────────────── その他パーツ ───────────────────── */
@@ -1938,20 +1595,58 @@ CCB<=50 【魔法弾】
             gap             : 8px;
             margin          : 8px;
         }
-        .del {  /* デリートボタン */
-            width      : 22px;
-            background : #833;
+        /* 基本ボタン共通 ――――――――――――――――――― */
+        .del {
+          display         : inline-flex;
+          align-items     : center;
+          justify-content : center;
+          width           : 22px;
+          height          : 22px;
+          padding         : 0;
+          font-size       : 13px;
+          line-height     : 1;
+          border          : none;
+          border-radius   : 4px;
+          background      : #555;
+          color           : #ccc;
+          cursor          : pointer;
+          transition      : filter .15s ease, transform .08s ease;
         }
-        .add {  /* 追加ボタン */
-            background : #3a5;
-            padding    : 4px 12px;
+        .add,
+        .save {
+          display          : inline-flex;
+          align-items      : center;
+          justify-content  : center;
+          gap              : 4px;
+          min-width        : 22px;
+          height           : 24px;
+          padding          : 0 12px;
+          font-size        : 13px;
+          font-weight      : 600;
+          line-height      : 1;
+          color            : #fff;
+          border           : none;
+          border-radius    : 4px;
+          box-shadow       : 0 1px 2px rgba(0,0,0,.4);
+          cursor           : pointer;
+          transition       : filter .15s ease, transform .08s ease;
         }
-        .save {  /* 保存ボタン */
-            background : #357;
-            padding    : 4px 12px;
-        }
-        .del:hover, .add:hover, .save:hover {
-            filter : brightness(1. 2);
+
+        /* 各色 ――――――――――――――――――――――――― */
+        .del  { background: #833; }
+        .add  { background: #3a5; }
+        .save { background: #357; }
+
+        /* ホバー / アクティブ ――――――――――――― */
+        .del:hover,  .b.add:hover,  .b.save:hover  { filter: brightness(1.15); }
+        .del:active, .b.add:active, .b.save:active { transform: translateY(1px); }
+
+        /* キーボードフォーカスも分かりやすく */
+        .del:focus-visible,
+        .add:focus-visible,
+        .save:focus-visible {
+          outline        : 2px solid #fff;
+          outline-offset : 2px;
         }
 
         #tm-launch {
@@ -1984,6 +1679,57 @@ CCB<=50 【魔法弾】
             stroke : #e0e0e0;
             fill   : none;
             stroke-width : 1.8;
+        }
+
+        /* ── 確認モーダル ────────────────── */
+        #tm-confirm {
+            position        : fixed;
+            inset           : 0;
+            z-index         : 2000;
+            display         : flex;
+            align-items     : center;
+            justify-content : center;
+        }
+        #tm-confirm .cf-back {
+            position        : absolute;
+            inset           : 0;
+            background      : rgba(0, 0, 0, .55);
+            backdrop-filter : blur(2px);
+        }
+        #tm-confirm .cf-panel {
+            position      : relative;
+            min-width     : 240px;
+            background    : #2d2d2d;
+            border        : 1px solid #666;
+            border-radius : 6px;
+            padding       : 16px 20px;
+            color         : #eee;
+            font-size     : 14px;
+            box-shadow    : 0 4px 12px rgba(0, 0, 0, .4);
+        }
+        #tm-confirm footer {
+            margin-top : 14px;
+            text-align : right;
+        }
+        #tm-confirm button {
+            margin-left   : 6px;
+            padding       : 4px 10px;
+            border        : none;
+            border-radius : 4px;
+            font-size     : 13px;
+            cursor        : pointer;
+            transition    : filter .1s;
+        }
+        #tm-confirm .cf-ok {
+            background : #b33;
+            color      : #fff;
+        }
+        #tm-confirm .cf-cancel {
+            background : #555;
+            color      : #fff;
+        }
+        #tm-confirm button:hover {
+            filter : brightness(1.15);
         }
 
         /* ─────────────────────  CodeMirror  ───────────────────── */
@@ -2074,206 +1820,204 @@ CCB<=50 【魔法弾】
             color : #ffe066;
         }
     `;
-    document.head.appendChild(Object.assign(document.createElement('style'), { textContent: css }));
+document.head.appendChild(Object.assign(document.createElement('style'), { textContent: css }));
 
-    /* ========== ドラッグ／リサイズ ========== */
-    const drag = (el) => {
-        const hd = el.querySelector('.head'); let sx = 0, sy = 0, ox = 0, oy = 0, d = false;
-        hd.addEventListener('pointerdown', e => {
-            if (e.target.closest('.b')) return;
-            d = true; sx = e.clientX; sy = e.clientY; const r = el.getBoundingClientRect(); ox = r.left; oy = r.top;
-            hd.setPointerCapture(e.pointerId);
-        });
-        hd.addEventListener('pointermove', e => {
-            if (!d) return; el.style.left = `${clamp(ox + e.clientX - sx, 0, innerWidth - 100)}px`;
-            el.style.top = `${clamp(oy + e.clientY - sy, 0, innerHeight - 40)}px`;
-        });
-        hd.addEventListener('pointerup', () => { d = false; const r = el.getBoundingClientRect(); storePos(name, Math.round(r.left), Math.round(r.top)); });
-    };
-    const resz = (el) => {
-        const g = el.querySelector('.rs'); let w = 0, h = 0, sx = 0, sy = 0, r = false;
-        g.addEventListener('pointerdown', e => {
-            r = true; sx = e.clientX; sy = e.clientY; const rt = el.getBoundingClientRect(); w = rt.width; h = rt.height;
-            g.setPointerCapture(e.pointerId);
-        });
-        g.addEventListener('pointermove', e => {
-            if (!r) return; el.style.width = `${Math.max(w + e.clientX - sx, 240)}px`;
-            el.style.height = `${Math.max(h + e.clientY - sy, 160)}px`;
-        });
-        g.addEventListener('pointerup', () => r = false);
-    };
+/* ========== ドラッグ／リサイズ ========== */
+const drag = (el) => {
+    const hd = el.querySelector('.head'); let sx = 0, sy = 0, ox = 0, oy = 0, d = false;
+    hd.addEventListener('pointerdown', e => {
+        if (e.target.closest('.b')) return;
+        d = true; sx = e.clientX; sy = e.clientY; const r = el.getBoundingClientRect(); ox = r.left; oy = r.top;
+        hd.setPointerCapture(e.pointerId);
+    });
+    hd.addEventListener('pointermove', e => {
+        if (!d) return; el.style.left = `${clamp(ox + e.clientX - sx, 0, innerWidth - 100)}px`;
+        el.style.top = `${clamp(oy + e.clientY - sy, 0, innerHeight - 40)}px`;
+    });
+    hd.addEventListener('pointerup', () => { d = false; const r = el.getBoundingClientRect(); storePos(name, Math.round(r.left), Math.round(r.top)); });
+};
+const resz = (el) => {
+    const g = el.querySelector('.rs'); let w = 0, h = 0, sx = 0, sy = 0, r = false;
+    g.addEventListener('pointerdown', e => {
+        r = true; sx = e.clientX; sy = e.clientY; const rt = el.getBoundingClientRect(); w = rt.width; h = rt.height;
+        g.setPointerCapture(e.pointerId);
+    });
+    g.addEventListener('pointermove', e => {
+        if (!r) return; el.style.width = `${Math.max(w + e.clientX - sx, 240)}px`;
+        el.style.height = `${Math.max(h + e.clientY - sy, 160)}px`;
+    });
+    g.addEventListener('pointerup', () => r = false);
+};
 
-    /* ========== パレット ========== */
-    let win = null, ed = null, vr = null, au = null, rc = null, rcObs = null, tabObs = null;
-    const buildWin = () => {
-        if (win) win.remove();
-        win = document.createElement('div'); win.id = 'tm-win';
-        win.innerHTML = `<div class="head"><span>パレット</span><button class="b" id="autoHideB">🎲</button><button class="b" id="impB">⤒</button><button class="b" id="expB">⤓</button>
-                             <button class="b" id="hB">？</button><button class="b" id="aB">A</button><button class="b" id="vB">Φ</button>
-                             <button class="b" id="eB">⚙</button><button class="b" id="cB">✕</button></div><div class="g" id="gp"></div><div class="rs"></div>`;
-        drag(win); resz(win);
-        const gp = win.querySelector('#gp');
-        cmds.forEach(({ label, lines }, i) => {
-            const btn = document.createElement('button');
-            btn.textContent = label || `Button${i + 1}`;
-            btn.onclick = () => enqueueSend(lines);
-            gp.appendChild(btn);
-            win.querySelector('#cB').onclick = () => win.remove();
+/* ========== パレット ========== */
+let win = null, ed = null, vr = null, hl = null;
+const buildWin = () => {
+    if (win) win.remove();
+    win = document.createElement('div'); win.id = 'tm-win';
+    win.innerHTML = `<div class="head"><span>パレット</span><button class="b" id="autoHideB">🎲</button><button class="b" id="impB">⤒</button><button class="b" id="expB">⤓</button>
+                         <button class="b" id="hB">？</button><button class="b" id="aB">A</button><button class="b" id="vB">Φ</button>
+                         <button class="b" id="eB">⚙</button><button class="b" id="cB">✕</button></div><div class="g" id="gp"></div><div class="rs"></div>`;
+    drag(win); resz(win);
+    const gp = win.querySelector('#gp');
+    cmds.forEach(({ label, lines }, i) => {
+        const btn = document.createElement('button');
+        btn.textContent = label || `Button${i + 1}`;
+        btn.onclick = () => enqueueSend(lines);
+        gp.appendChild(btn);
+        win.querySelector('#cB').onclick = () => win.remove();
+    });
+    win.querySelector('#eB').onclick = toggleEd;
+    win.querySelector('#vB').onclick = toggleVar;
+    win.querySelector('#hB').onclick = toggleHelp;
+    win.querySelector('#impB').onclick = importConfig;
+    win.querySelector('#expB').onclick = exportConfig;
+    win.querySelector('#autoHideB').onclick = () => {
+        hideAutoCards = !hideAutoCards;
+        document.querySelectorAll(`${CARD_SEL}[${AUTO_ATTR}]`).forEach(el => { el.style.display = (hideAutoCards && el.getAttribute(AUTO_ATTR) === 'true') ? 'none' : ''; });
+    };
+    document.body.appendChild(win);
+};
+const toggleWin = () => document.body.contains(win) ? win.remove() : buildWin();
+
+/* ========== コマンド編集 ========== */
+const toggleEd = () => {
+    if (ed) { ed.remove(); ed = null; return; }
+    let isWrite = false;
+    // ----------  ウィンドウ骨格 ----------
+    ed = document.createElement('div'); ed.id = 'tm-ed';
+    ed.innerHTML = `<div class="head"><span>コマンド編集</span><button class="b" id="x">✕</button></div><div class="list" id="ls"></div><div class="dock"><button class="b add"id="ad">■ 追加</button><button class="b save" id="sv">■ 保存</button></div><div class="rs"></div>`;
+    drag(ed); resz(ed);
+    document.body.appendChild(ed);
+
+    const ls = ed.querySelector('#ls');
+    const cmQueue = [];
+    let idleToken = null;
+
+    const rIdle = window.requestIdleCallback || (cb => setTimeout(() => cb({timeRemaining:() => 0}), 80));
+
+    function queueCM(row){ cmQueue.push(row); if(!idleToken) idleToken = rIdle(runQueue,{timeout:500}); }
+
+    function runQueue(deadline){
+        let count = 0;
+        while(cmQueue.length && (deadline.timeRemaining() > 5) && count < 3) {
+            createCM(cmQueue.shift());
+            count++;
+        }
+        if(cmQueue.length) { idleToken = rIdle(runQueue,{timeout:500}); }
+        else{ idleToken = null; }
+    }
+
+    function createCM(row) {
+        row.classList.remove('pending-cm');
+        const ta = row.querySelector('.cmd-lines');
+        ta.style.display = 'none';
+
+        const cm = CodeMirror.fromTextArea(ta, {
+            theme             : 'monokai',
+            mode              : 'javascript',
+            lineNumbers       : true,
+            lineWrapping      : true,
+            autoCloseBrackets : true,
+            matchBrackets     : true,
+            foldGutter        : true,
+            gutters           : [ "CodeMirror-linenumbers", "CodeMirror-foldgutter" ],
+            extraKeys         : { 'Ctrl-Space': 'autocomplete', 'Tab': cm => cm.showHint({hint: CodeMirror.hint.palette, completeSingle: false}) },
+            hintOptions       : { hint: CodeMirror.hint.palette, completeSingle:false }
         });
-        win.querySelector('#eB').onclick = toggleEd;
-        win.querySelector('#vB').onclick = toggleVar;
-        win.querySelector('#aB').onclick = toggleAuto;
-        win.querySelector('#hB').onclick = toggleHelp;
-        win.querySelector('#impB').onclick = importConfig;
-        win.querySelector('#expB').onclick = exportConfig;
-        win.querySelector('#autoHideB').onclick = () => {
-            hideAutoCards = !hideAutoCards;
-            document.querySelectorAll(`${CARD_SEL}[${AUTO_ATTR}]`)
-                .forEach(el => {
-                el.style.display =
-                    (hideAutoCards && el.getAttribute(AUTO_ATTR) === 'true')
-                    ? 'none' : '';
-            });
+        cm.addOverlay(highlightPaletteKW);
+        cm.addOverlay(paletteOverlay);
+        const varOv = buildVarsOverlay();
+        if (varOv) cm.addOverlay(varOv);
+        cm.setSize('100%', 'auto');
+        // ───────────────────────────────
+        const ls = row.parentElement;
+        const keepView = () =>{
+            const yInRow = cm.cursorCoords(null,'local').top;
+            const top = row.offsetTop + yInRow;
+            const bottom = top + cm.defaultTextHeight();
+            const viewTop = ls.scrollTop;
+            const viewBot = viewTop + ls.clientHeight;
+            if (top < viewTop) ls.scrollTop = top - 8;
+            else if (bottom> viewBot) ls.scrollTop = bottom - ls.clientHeight + 8;
         };
-        document.body.appendChild(win);
-    };
-    const toggleWin = () => document.body.contains(win) ? win.remove() : buildWin();
 
-    /* ========== コマンド編集 ========== */
-    const toggleEd = () => {
-        if (ed) { ed.remove(); ed = null; return; }
+        cm.on('cursorActivity', keepView);
+        cm.on('change', keepView);
+        // ───────────────────────────────
 
-        // ----------  ウィンドウ骨格 ----------
-        ed = document.createElement('div'); ed.id = 'tm-ed';
-        ed.innerHTML = `<div class="head"><span>コマンド編集</span><button class="b" id="x">✕</button></div>
-                            <div class="list" id="ls"></div><div class="dock"><button class="b add"id="ad">■ 追加</button><button class="b save" id="sv">■ 保存</button></div><div class="rs"></div>`;
-        drag(ed); resz(ed);
-        document.body.appendChild(ed);
-
-        const ls = ed.querySelector('#ls');
-        const cmQueue = [];
-        let idleToken = null;
-
-        const rIdle = window.requestIdleCallback || (cb => setTimeout(() => cb({timeRemaining:() => 0}), 80));
-
-        function queueCM(row){ cmQueue.push(row); if(!idleToken) idleToken = rIdle(runQueue,{timeout:500}); }
-
-        function runQueue(deadline){
-            let count = 0;
-            while(cmQueue.length && (deadline.timeRemaining() > 5) && count < 3) {
-                createCM(cmQueue.shift());
-                count++;
+        cm.on('change', () => { isWrite = true; classifyRow(row, cm.getLine(0).trim()); cm.setSize('100%', 'auto'); });
+        cm.on('inputRead', (cm, change) => {
+            if (change.text[0] === '.') {
+                setTimeout(() => cm.showHint({
+                    hint : CodeMirror.hint.member,
+                    completeSingle: false
+                }), 0);
             }
-            if(cmQueue.length) { idleToken = rIdle(runQueue,{timeout:500}); }
-            else{ idleToken = null; }
-        }
+        });
+        CM_SET.set(row, cm);
+        classifyRow(row, cm.getLine(0).trim());
+    }
 
-        function createCM(row) {
-            row.classList.remove('pending-cm');
-            const ta = row.querySelector('.cmd-lines');
-            ta.style.display = 'none';
+    // ――― アイドル時間に 3 行ずつ処理 ―――
+    function buildEditorsGradually() {
+        const pending = ls.querySelectorAll('.pending-cm');
+        if (!pending.length) return;
 
-            const cm = CodeMirror.fromTextArea(ta, {
-                theme             : 'monokai',
-                mode              : 'javascript',
-                lineNumbers       : true,
-                lineWrapping      : true,
-                autoCloseBrackets : true,
-                matchBrackets     : true,
-                foldGutter        : true,
-                gutters           : [ "CodeMirror-linenumbers", "CodeMirror-foldgutter" ],
-                extraKeys         : { 'Ctrl-Space': 'autocomplete', 'Tab': cm => cm.showHint({hint: CodeMirror.hint.palette, completeSingle: false}) },
-                hintOptions       : { hint: CodeMirror.hint.palette, completeSingle:false }
-            });
-            cm.addOverlay(highlightPaletteKW);
-            cm.addOverlay(paletteOverlay);
-            const varOv = buildVarsOverlay();
-            if (varOv) cm.addOverlay(varOv);
-            cm.setSize('100%', 'auto');
-            // ───────────────────────────────
-            const ls = row.parentElement;
-            const keepView = () =>{
-                const yInRow = cm.cursorCoords(null,'local').top;
-                const top = row.offsetTop + yInRow;
-                const bottom = top + cm.defaultTextHeight();
-                const viewTop = ls.scrollTop;
-                const viewBot = viewTop + ls.clientHeight;
-                if (top < viewTop) ls.scrollTop = top - 8;
-                else if (bottom> viewBot) ls.scrollTop = bottom - ls.clientHeight + 8;
-            };
+        [...pending].slice(0, 3).forEach(createCM);
+        idle(buildEditorsGradually);
+    }
 
-            cm.on('cursorActivity', keepView);
-            cm.on('change', keepView);
-            // ───────────────────────────────
-
-            cm.on('change', () => { classifyRow(row, cm.getLine(0).trim()); cm.setSize('100%', 'auto'); });
-            cm.on('inputRead', (cm, change) => {
-                if (change.text[0] === '.') {
-                    setTimeout(() => cm.showHint({
-                        hint : CodeMirror.hint.member,
-                        completeSingle: false
-                    }), 0);
-                }
-            });
-            CM_SET.set(row, cm);
-            classifyRow(row, cm.getLine(0).trim());
-        }
-
-        // ――― アイドル時間に 3 行ずつ処理 ―――
-        function buildEditorsGradually() {
-            const pending = ls.querySelectorAll('.pending-cm');
-            if (!pending.length) return;
-
-            [...pending].slice(0, 3).forEach(createCM);
-            idle(buildEditorsGradually);
-        }
-
-        // ----------  行タイプ判定 ----------
-        const classifyRow = (row, firstLine = '') => {
-            row.classList.remove('type-cmd', 'type-wait', 'type-script');
-            if (/^\[\s*(WAIT|WAITMSG)\b/i.test(firstLine)) row.classList.add('type-wait');
-            else if (/^\[\s*$/.test(firstLine)) row.classList.add('type-script');
-            else row.classList.add('type-cmd');
-        };
-
-        // ----------  行（row）生成 ----------
-        const addRow = (c = { label: '', lines: [] }) => {
-            const row = document.createElement('div');
-            row.className = 'row pending-cm';
-            row.innerHTML = `<input class="cmd-label" value="${c.label}"><textarea class="cmd-lines">${c.lines.join('\n')}</textarea><div class="ctrl"><button class="b up" title="上へ">▲</button><button class="b down" title="下へ">▼</button><button class="b del" title="削除">✕</button></div>`;
-            row.querySelector('.del').onclick = () => { CM_SET.delete(row); row.remove(); };
-            row.querySelector('.up').onclick = () => { const prev = row.previousElementSibling; if (prev) ls.insertBefore(row, prev); };
-            row.querySelector('.down').onclick = () => { const next = row.nextElementSibling?.nextElementSibling; if (next) ls.insertBefore(row, next); else ls.appendChild(row); };
-            ls.appendChild(row);
-            classifyRow(row, (c.lines[0] || '').trim());
-            queueCM(row);
-        };
-
-        cmds.forEach(addRow);
-        ed.querySelector('#ad').onclick = () => addRow();
-        // ----------  保存 ----------
-        ed.querySelector('#sv').onclick = () => {
-            cmds = [...ls.querySelectorAll('.row')].map(row => {
-                const label = row.querySelector('.cmd-label').value.trim();
-                const srcTxt = CM_SET.has(row) ? CM_SET.get(row).getValue() : row.querySelector('.cmd-lines').value;
-                const lines = srcTxt.split(/\r?\n/).map(l => l.replace(/\s+$/, '')).filter((l, i, a) => !((i === 0 || i === a.length - 1) && l === ''));
-                while (lines[0] !== undefined && lines[0].trim() === '') lines.shift();
-                while (lines[lines.length - 1] !== undefined && lines[lines.length - 1].trim() === '') lines.pop();
-                return label && lines.length ? { label, lines } : null;
-            }).filter(Boolean);
-
-            save(CMD_KEY, cmds);
-            buildWin();
-            ed.remove(); ed = null;
-        };
-        ed.querySelector('#x').onclick = () => { ed.remove(); ed = null; };
+    // ----------  行タイプ判定 ----------
+    const classifyRow = (row, firstLine = '') => {
+        row.classList.remove('type-cmd', 'type-wait', 'type-script');
+        if (/^\[\s*(WAIT|WAITMSG)\b/i.test(firstLine)) row.classList.add('type-wait');
+        else if (/^\[\s*$/.test(firstLine)) row.classList.add('type-script');
+        else row.classList.add('type-cmd');
     };
 
-    /* ========== 変数編集 ========== */
-    const toggleVar = () => {
-        if (vr) { vr.remove(); vr = null; return; }
-        vr = document.createElement('div'); vr.id = 'tm-var';
-        vr.innerHTML = `<div class="head"><span>変数編集</span><button class="b" id="x">✕</button></div>
+    // ----------  行（row）生成 ----------
+    const addRow = (c = { label: '', lines: [] }) => {
+        const row = document.createElement('div');
+        row.className = 'row pending-cm';
+        row.innerHTML = `<input class="cmd-label" value="${c.label}"><textarea class="cmd-lines">${c.lines.join('\n')}</textarea><div class="ctrl"><button class="b up" title="上へ">▲</button><button class="b down" title="下へ">▼</button><button class="b del" title="削除">✕</button></div>`;
+        row.querySelector('.del').onclick = () => { CM_SET.delete(row); row.remove(); };
+        row.querySelector('.up').onclick = () => { const prev = row.previousElementSibling; if (prev) ls.insertBefore(row, prev); };
+        row.querySelector('.down').onclick = () => { const next = row.nextElementSibling?.nextElementSibling; if (next) ls.insertBefore(row, next); else ls.appendChild(row); };
+        ls.appendChild(row);
+        classifyRow(row, (c.lines[0] || '').trim());
+        queueCM(row);
+    };
+
+    cmds.forEach(addRow);
+    ed.querySelector('#ad').onclick = () => addRow();
+    // ----------  保存 ----------
+    ed.querySelector('#sv').onclick = () => {
+        cmds = [...ls.querySelectorAll('.row')].map(row => {
+            const label = row.querySelector('.cmd-label').value.trim();
+            const srcTxt = CM_SET.has(row) ? CM_SET.get(row).getValue() : row.querySelector('.cmd-lines').value;
+            const lines = srcTxt.split(/\r?\n/).map(l => l.replace(/\s+$/, '')).filter((l, i, a) => !((i === 0 || i === a.length - 1) && l === ''));
+            while (lines[0] !== undefined && lines[0].trim() === '') lines.shift();
+            while (lines[lines.length - 1] !== undefined && lines[lines.length - 1].trim() === '') lines.pop();
+            return label && lines.length ? { label, lines } : null;
+        }).filter(Boolean);
+
+        save(CMD_KEY, cmds);
+        buildWin();
+        ed.remove(); ed = null;
+    };
+    const closeEd = () => {
+        if (!isWrite) { ed.remove(); ed = null; return; }
+        askDiscard(ok => { if (ok) { isWrite = false; ed.remove(); ed = null; } });
+    };
+    ed.querySelector('#x').onclick = closeEd;
+};
+
+/* ========== 変数編集 ========== */
+const toggleVar = () => {
+    if (vr) { vr.remove(); vr = null; return; }
+    let isWrite = false;
+    vr = document.createElement('div'); vr.id = 'tm-var';
+    vr.innerHTML = `<div class="head"><span>変数編集</span><button class="b" id="x">✕</button></div>
                             <div class="list" id="vl"></div>
                             <div class="dock"><button class="b add" id="ad">■ 追加</button><button class="b save" id="sv">■ 保存</button></div>
                             <div class="rs"></div>`;
@@ -2292,83 +2036,37 @@ CCB<=50 【魔法弾】
         }
         const vl = vr.querySelector('#vl');
         const addRow = (v = { name: '', value: '' }) => {
-            const r = document.createElement('div'); r.className = 'row';
-            r.innerHTML = `<input placeholder="名前" value="${v.name}">
-                               <input placeholder="値"   value="${v.value}">
-                               <button class="b del">✕</button>`;
+            const r = document.createElement('div');
+            r.className = 'var-row';
+            r.innerHTML = `<input class="var-key" placeholder="名前" value="${v.name}"><input class="var-value" placeholder="値" value="${v.value}"><button class="b del">✕</button>`;
             r.querySelector('.del').onclick = () => r.remove();
+            r.querySelectorAll('input').forEach(inp => inp.addEventListener('input', () => isWrite = true));
             vl.appendChild(r);
         };
         vars.forEach(addRow);
         vr.querySelector('#ad').onclick = () => addRow();
         vr.querySelector('#sv').onclick = () => {
-            vars = [...vl.querySelectorAll('.row')].map(r => {
+            vars = [...vl.querySelectorAll('.var-row')].map(r => {
                 const [n, v] = r.querySelectorAll('input'); return { name: n.value.trim(), value: v.value.trim() };
             }).filter(o => o.name);
             save(VAR_KEY, vars);
             refreshAllEditorsVarOverlay();
             vr.remove(); vr = null;
         };
-        vr.querySelector('#x').onclick = () => { vr.remove(); vr = null; };
+        const closeVar = () => {
+            if (!isWrite) { vr.remove(); vr = null; return; }
+            askDiscard(ok => { if (ok) { isWrite = false; vr.remove(); vr = null; } });
+        };
+        vr.querySelector('#x').onclick = closeVar;
         document.body.appendChild(vr);
     };
 
-    /* ========== Auto コマンド編集 ========== */
-    const toggleAuto = () => {
-        if (au) { au.remove(); au = null; startAutoLoop(); return; }
-        stopAutoLoop();
-        au = document.createElement('div'); au.id = 'tm-au';
-        au.innerHTML = `<div class="head"><span>AUTO コマンド</span><button class="b" id="x">✕</button></div>
-                            <textarea id="au-ta"style="flex:1;min-height:0;margin:8px;background:#555;color:#fff;
-                                                       border:1px solid #777;font-family:monospace;font-size:12px;resize:none;white-space:pre;"></textarea>
-                            <div class="dock"><button class="b save" id="sv">■ 保存</button></div><div class="rs"></div>`;
-        drag(au); resz(au);
-        const ta = au.querySelector('#au-ta');
-        ta.value = autoCmd.join('\n');
-        buildRTfromGui();
-        au.querySelector('#sv').onclick = () => {
-            autoCmd = ta.value.split(/\r?\n/);
-            save(AUTO_KEY, autoCmd);
-            const tokens = tokenize(autoCmd.join('\n'));
-            console.log('tokens=', tokens);
-            autoAst = parse(tokens);
-            autoAst.forEach(n => {
-                if (n.kind === 'decl' || (n.kind === 'expr' && n.immediate)) {
-                    evalNode(n, RT);
-                }
-            });
-            au.remove(); au = null;
-            startAutoLoop();
-            console.log('autoTicker=', autoTicker);
-            console.log('autoAst=', autoAst);
-        };
-        au.querySelector('#x').onclick = () => { au.remove(); au = null; startAutoLoop(); };
-        document.body.appendChild(au);
-    };
+/* ========== Help ウインドウ ========== */
+const toggleHelp = () => {
+    if (hl) { hl.remove(); hl = null; return; }
 
-    /* ========== Help ウインドウ ========== */
-    function beautifyHelpCode () {
-        if (typeof CodeMirror === 'undefined') return;
-        hl.querySelectorAll('#tm-help-article pre').forEach(pre => {
-            const cm = CodeMirror(function(elt){
-                pre.replaceWith(elt);
-            },{
-                value : pre.textContent,
-                mode  : 'javascript',
-                theme : 'monokai',
-                readOnly : true,
-                lineNumbers : true,
-                viewportMargin : Infinity
-            });
-            cm.getScrollerElement().style.background = '#1e1e1e';
-        });
-    }
-
-    const toggleHelp = () => {
-        if (hl) { hl.remove(); hl = null; return; }
-
-        hl = document.createElement('div'); hl.id = 'tm-help';
-        hl.innerHTML = `<div class="head"><span>ヘルプ</span><button class="b" id="x">✕</button></div>
+    hl = document.createElement('div'); hl.id = 'tm-help';
+    hl.innerHTML = `<div class="head"><span>ヘルプ</span><button class="b" id="x">✕</button></div>
                             <div style="flex:1;overflow:auto;padding:8px;font-size:12px;line-height:1.4;">${HELP_HTML}</div>
                             <div class="rs"></div>`;
         drag(hl); resz(hl);
@@ -2387,14 +2085,14 @@ CCB<=50 【魔法弾】
         beautifyHelpCode();
     };
 
-    /* ========== ランチャーボタン ========== */
-    const injectLaunch = () => wait(DICEBAR).then(bar => {
-        if (bar.querySelector('#tm-launch')) return;
+/* ========== ランチャーボタン ========== */
+const injectLaunch = () => wait(DICEBAR).then(bar => {
+    if (bar.querySelector('#tm-launch')) return;
 
-        const btn = document.createElement('button');
-        btn.id = 'tm-launch'; btn.type = 'button'; btn.title = '拡張チャットパレット (Alt+P)';
-        btn.className = 'MuiButtonBase-root tm-launch-btn';
-        btn.innerHTML = `<svg viewBox="0 0 24 24" class="tm-launch-ico">
+    const btn = document.createElement('button');
+    btn.id = 'tm-launch'; btn.type = 'button'; btn.title = '拡張チャットパレット (Alt+P)';
+    btn.className = 'MuiButtonBase-root tm-launch-btn';
+    btn.innerHTML = `<svg viewBox="0 0 24 24" class="tm-launch-ico">
                            <rect x="4" y="3"  width="16" height="18" rx="2" ry="2"/>
                            <rect x="9" y="1"  width="6"  height="4"  rx="1" ry="1"/>
                            <line  x1="7" y1="8" x2="17" y2="8"/>
@@ -2404,21 +2102,21 @@ CCB<=50 【魔法弾】
         btn.onclick = toggleWin;
         bar.appendChild(btn);
     });
-    injectLaunch();
-    setInterval(injectLaunch, 1500);
+injectLaunch();
+setInterval(injectLaunch, 1500);
 
-    /* ========== Hotkeys ========== */
-    document.addEventListener('keydown', e => {
-        if (e.altKey && !e.ctrlKey && !e.shiftKey) {
-            const k = e.key.toLowerCase();
-            if (k === HK_VIEW) toggleWin();
-            if (k === HK_EDIT) toggleEd();
-            if (k === HK_VARS) toggleVar();
-            if (e.key === 'e') win.style.display = (win.style.display === 'none') ? '' : 'none';
-        }
-    });
+/* ========== Hotkeys ========== */
+document.addEventListener('keydown', e => {
+    if (e.altKey && !e.ctrlKey && !e.shiftKey) {
+        const k = e.key.toLowerCase();
+        if (k === HK_VIEW) toggleWin();
+        if (k === HK_EDIT) toggleEd();
+        if (k === HK_VARS) toggleVar();
+        if (e.key === 'e') win.style.display = (win.style.display === 'none') ? '' : 'none';
+    }
+});
 
-    /* ========== URL 遷移 クリーンアップ ========== */
-    let path = location.pathname;
-    setInterval(() => { if (location.pathname !== path) { path = location.pathname; win?.remove(); ed?.remove(); vr?.remove(); } }, 800);
+/* ========== URL 遷移 クリーンアップ ========== */
+let path = location.pathname;
+setInterval(() => { if (location.pathname !== path) { path = location.pathname; win?.remove(); ed?.remove(); vr?.remove(); } }, 800);
 })();
