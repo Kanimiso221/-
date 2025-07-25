@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name              CCUnipo
-// @version           1.5.0
+// @version           1.5.1
 // @description       ココフォリア上で使用できるいるか分からない機能を追加！
 // @author            Apocrypha
 // @match             https://ccfolia.com/rooms/*
@@ -2797,7 +2797,7 @@ CCB<=50 【魔法弾】
      *  ウィンドウをリサイズしたら “Fit Width / Fit Page”
      *  の時だけ再描画して拡大率を合わせ直す                    */
     const ro = new ResizeObserver(() => {
-        if (active && active.fit !== 'custom') renderPage(active.page, /*keepFit=*/true);
+        if (active && active.fit !== 'custom') renderPage(active.page, /*keepFit=*/false);
     });
     ro.observe(wrap);   // 左右スクロール領域
     ro.observe(viewer); // 全体ウィンドウ
