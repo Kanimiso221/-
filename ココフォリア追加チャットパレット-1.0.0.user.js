@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name              CCUnipo
 // @version           1.5.0
-// @description:ja    ココフォリア上で使用できるいるか分からない機能を追加！
+// @description       ココフォリア上で使用できるいるか分からない機能を追加！
 // @author            Apocrypha
 // @match             https://ccfolia.com/rooms/*
 // @updateURL         https://github.com/Kanimiso221/CCFOLIA_ADD_PALLET/raw/main/%E3%82%B3%E3%82%B3%E3%83%95%E3%82%A9%E3%83%AA%E3%82%A2%E8%BF%BD%E5%8A%A0%E3%83%81%E3%83%A3%E3%83%83%E3%83%88%E3%83%91%E3%83%AC%E3%83%83%E3%83%88-1.0.0.user.js
